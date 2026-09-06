@@ -1,0 +1,321 @@
+{
+  "schemaVersion": "0.1",
+  "title": "桌面端 Skills 分组管理维护技术方案 V2",
+  "summary": "把产品定义为本地优先的 Skills Control Center：先发现本机 Skill 与 Agent，再将外部副本纳入统一 Library；Group 只分类、Bundle 表达部署意图；所有写入先生成 Sync Plan，经依赖、冲突、漂移与安全检查后，由具备能力声明的 Agent Adapter 执行，并用 Snapshot + Hash + Verify 管理更新与回滚。",
+  "meta": {
+    "status": "draft",
+    "version": "v2",
+    "scope": "Desktop Skills Control Center",
+    "confidence": "medium"
+  },
+  "scoping": {
+    "fullDesignRequired": true,
+    "pressure": "high",
+    "reasons": [
+      "这是一个新的桌面端本地资产管理产品，不只是简单 CRUD",
+      "需要兼容多种 Agent/产品不同的发现、安装、更新与同步能力",
+      "涉及本地文件系统写入、第三方代码型 Skill、Git 来源与目标目录漂移",
+      "UI、领域模型、Discovery、Sync、Update 与安全策略需要一起闭环"
+    ],
+    "dimensions": {
+      "changeScope": "high",
+      "dataChange": "medium",
+      "callChain": "medium",
+      "businessRisk": "medium",
+      "performanceCapacity": "low",
+      "technicalUncertainty": "high"
+    }
+  },
+  "brief": {
+    "bottomLine": "做一个本地优先的 Skills Control Center：统一发现和维护 Skill，一处完成分组、Bundle、版本与关系管理，再通过 Adapter 安全同步到不同 Agent；发现不等于接管，同步不等于覆盖。",
+    "keyChanges": [
+      "一级产品结构收敛为 Skills、Groups & Bundles、Agents、Sync、Settings 五个页面",
+      "Skill 逻辑资产与 Agent 中发现的 SkillInstance 分离，Library 是唯一 canonical source",
+      "Discovery Engine 只扫描 Adapter 给出的候选目录和用户配置源，不做全盘搜索",
+      "所有部署先生成 Sync Plan，默认 Copy + Hash + Snapshot + Atomic Replace + Verify",
+      "更新管理显式区分 Upstream Update、Local Modified、Target Drift、Conflict、Unmanaged、Missing"
+    ],
+    "impact": "以后新增 Agent、Git Source 或新的安装方式，只扩展 Adapter / Source Provider，不修改 Skill、Group、Bundle 的核心模型。",
+    "keyRisks": [
+      "不同 Agent 的 Skill 安装/发现机制不统一，必须通过 capability 声明而不是硬编码路径",
+      "第三方 Skill 可以包含可执行脚本，管理器扫描和同步时绝不能执行这些脚本"
+    ],
+    "delivery": "V1 先打通 Claude Code + 一个第二目标的完整闭环，并保留 manual-export 作为其他目标的诚实降级；默认自动检查更新，但不自动覆盖。"
+  },
+  "evidence": {
+    "facts": [
+      {
+        "id": "fact-agent-skills-format",
+        "text": "Agent Skills 规范定义 Skill 为至少包含 SKILL.md 的目录，并可包含 scripts、references、assets 等资源。",
+        "source": "https://agentskills.io/specification"
+      },
+      {
+        "id": "fact-claude-discovery",
+        "text": "Claude Code/SDK 可从用户与项目文件系统目录发现 Skills。",
+        "source": "https://code.claude.com/docs/en/agent-sdk/skills"
+      },
+      {
+        "id": "fact-openai-surface-diff",
+        "text": "OpenAI Skills 遵循 Agent Skills 开放标准，但不同产品和 surface 的 availability、installation 与 syncing 可能不同。",
+        "source": "https://help.openai.com/en/articles/20001066-skills-in-chatgpt/"
+      },
+      {
+        "id": "fact-scripts-executable",
+        "text": "Agent Skills 的 scripts/ 可包含由 Agent 执行的代码，因此导入第三方 Skill 具有代码供应链风险。",
+        "source": "https://agentskills.io/specification"
+      }
+    ],
+    "assumptions": [
+      {
+        "id": "assumption-local-first",
+        "text": "首版是单机、本地优先产品，不依赖账号体系和服务端。",
+        "source": "V1 范围",
+        "material": true
+      },
+      {
+        "id": "assumption-no-script-execution",
+        "text": "管理器只读取、校验、复制或导出 Skill 文件，不执行 Skill 内脚本。",
+        "source": "安全边界",
+        "material": true
+      },
+      {
+        "id": "assumption-user-confirm-write",
+        "text": "对外部 Agent 目录的新增、更新和删除都必须经过 Sync Plan 预览与用户确认。",
+        "source": "同步策略",
+        "material": true
+      }
+    ],
+    "unknowns": [
+      {
+        "id": "unknown-v1-second-target",
+        "text": "除 Claude Code 外，V1 第二个具备完整写入能力的目标应在开工前按最新官方能力再定。",
+        "source": "Research Gate",
+        "material": true
+      }
+    ]
+  },
+  "blocks": [
+    {
+      "id": "pages",
+      "type": "change_set",
+      "title": "五个一级页面",
+      "importance": "high",
+      "reason": "信息架构会直接影响数据模型与 API。",
+      "reading": {"role": "core", "group": "overview"},
+      "representation": {"kind": "table", "engine": "native", "reason": "页面与职责适合对照。"},
+      "content": {
+        "columns": [
+          {"key": "page", "label": "页面"},
+          {"key": "question", "label": "解决的问题"},
+          {"key": "core", "label": "核心内容"}
+        ],
+        "rows": [
+          {"page": "Skills", "question": "我现在有哪些 Skill？", "core": "搜索、过滤、状态、详情、来源、版本、部署情况"},
+          {"page": "Groups & Bundles", "question": "怎么分类和组合？", "core": "Group、Bundle、required/optional、关系与冲突"},
+          {"page": "Agents", "question": "本机有哪些 Agent？", "core": "检测、版本、路径、Scope、Capabilities、SkillInstances"},
+          {"page": "Sync", "question": "这次同步会改什么？", "core": "Plan、Diff、Conflict、Apply、Verify、History、Rollback"},
+          {"page": "Settings", "question": "从哪里扫描和更新？", "core": "Sources、扫描目录、Adapter、更新策略、备份、日志"}
+        ]
+      }
+    },
+    {
+      "id": "architecture",
+      "type": "architecture",
+      "title": "总体架构",
+      "importance": "high",
+      "reason": "Discovery、Library、Planner 与 Adapter 的边界决定扩展性。",
+      "reading": {"role": "core", "group": "design"},
+      "representation": {"kind": "text", "engine": "native", "reason": "仓库初期先保留可直接阅读的语义架构。"},
+      "content": {
+        "body": "Skill Sources（Agent 目录 / Git / Local / ZIP）→ Discovery Engine → Canonical Library + SQLite Metadata → Sync & Update Planner → Agent Adapter Registry → Agent Targets。Library 管理 desired state，Agent 目录只是外部实例。"
+      }
+    },
+    {
+      "id": "discovery",
+      "type": "flow",
+      "title": "Agent 与 Skill 发现机制",
+      "importance": "high",
+      "reason": "发现机制不能依赖全盘扫描或写死路径。",
+      "reading": {"role": "core", "group": "design"},
+      "representation": {"kind": "cards", "engine": "native", "reason": "步骤有限。"},
+      "content": {
+        "cards": [
+          {"title": "1. Agent Detector", "body": "按 Adapter 检测 CLI、配置/App 目录和用户手动路径。"},
+          {"title": "2. Candidate Roots", "body": "每个 Adapter 返回自己负责的 Skill roots / scopes，禁止默认扫描整个磁盘。"},
+          {"title": "3. Skill Scanner", "body": "只在候选目录寻找 SKILL.md，解析 metadata、资源、可执行脚本和 contentHash。"},
+          {"title": "4. Identity Resolution", "body": "SourceId + RelativePath 作为来源身份，contentHash 辅助重复判断。"},
+          {"title": "5. Unmanaged First", "body": "发现副本先标 Unmanaged，用户选择 Adopt 后才进入 Library。"},
+          {"title": "6. Reconcile", "body": "Watcher + 启动/手动扫描；事件去抖并过滤自身写入。"}
+        ]
+      }
+    },
+    {
+      "id": "domain-model",
+      "type": "data",
+      "title": "领域模型",
+      "importance": "high",
+      "reason": "更新与漂移依赖正确区分逻辑资产与物理副本。",
+      "reading": {"role": "core", "group": "design"},
+      "representation": {"kind": "table", "engine": "native", "reason": "对象职责需要直接核对。"},
+      "content": {
+        "columns": [
+          {"key": "object", "label": "对象"},
+          {"key": "meaning", "label": "职责"},
+          {"key": "identity", "label": "关键规则"}
+        ],
+        "rows": [
+          {"object": "Skill", "meaning": "逻辑能力资产", "identity": "内部 UUID；name 不是全局主键"},
+          {"object": "SkillSource", "meaning": "Git/Local/ZIP/Agent 导入来源", "identity": "source type + locator + relative path"},
+          {"object": "SkillInstance", "meaning": "某 Agent/Scope 中的一份实际副本", "identity": "target + scope + physical path"},
+          {"object": "Group", "meaning": "纯分类", "identity": "Skill ↔ Group 多对多"},
+          {"object": "Bundle", "meaning": "可部署组合", "identity": "required / optional + order"},
+          {"object": "SkillRelation", "meaning": "显式依赖/冲突", "identity": "requires / recommends / conflicts / replaces"},
+          {"object": "AgentTarget", "meaning": "具体 Agent 安装/工作区目标", "identity": "adapter + installation/scope"},
+          {"object": "Deployment", "meaning": "受管部署记录", "identity": "skill + target + scope + deployedHash"},
+          {"object": "Snapshot", "meaning": "同步前回滚基线", "identity": "plan + target + timestamp"}
+        ]
+      }
+    },
+    {
+      "id": "sync",
+      "type": "flow",
+      "title": "安全同步链路",
+      "importance": "high",
+      "reason": "所有外部写入必须可预览、可验证、可回滚。",
+      "sourceRefs": ["assumption-user-confirm-write"],
+      "reading": {"role": "core", "group": "delivery"},
+      "representation": {"kind": "cards", "engine": "native", "reason": "链路适合按阶段扫描。"},
+      "content": {
+        "cards": [
+          {"title": "Resolve", "body": "展开 Bundle 和 requires，阻断循环依赖、hard conflict、目标不兼容。"},
+          {"title": "Build Plan", "body": "生成 add / update / remove / no-op / manual-export，并说明原因。"},
+          {"title": "Drift Check", "body": "比较目标当前 hash 与 deployedHash，存在 Drift 时先解决。"},
+          {"title": "Snapshot", "body": "只备份即将修改的受管内容，绝不删除 unmanaged 路径。"},
+          {"title": "Atomic Apply", "body": "先 staging 校验，再 replace；V1 默认 Copy + Hash，不默认 symlink。"},
+          {"title": "Verify", "body": "重新扫描/hash 并记录 Deployment；失败给出回滚动作。"}
+        ]
+      }
+    },
+    {
+      "id": "update-state",
+      "type": "data",
+      "title": "更新与漂移状态",
+      "importance": "high",
+      "reason": "更新不是简单的有无新版本。",
+      "reading": {"role": "core", "group": "delivery"},
+      "representation": {"kind": "table", "engine": "native", "reason": "状态与动作适合对照。"},
+      "content": {
+        "columns": [
+          {"key": "state", "label": "状态"},
+          {"key": "trigger", "label": "判断"},
+          {"key": "actions", "label": "动作"}
+        ],
+        "rows": [
+          {"state": "Clean", "trigger": "Library = tracked source，Target = deployedHash", "actions": "无需处理"},
+          {"state": "Upstream Update", "trigger": "Source 变化，Library 未改", "actions": "Diff → 更新 Library → 重新部署"},
+          {"state": "Local Modified", "trigger": "Library 相对 Base 有修改", "actions": "保留 / Commit / Fork"},
+          {"state": "Target Drift", "trigger": "目标文件与 deployedHash 不一致", "actions": "导入目标修改 / 覆盖 / 忽略"},
+          {"state": "Conflict", "trigger": "Upstream 与 Local 都改，或 Drift 与新部署相撞", "actions": "三方 Diff / 手工合并 / Fork"},
+          {"state": "Unmanaged", "trigger": "Agent 中发现但无 ownership", "actions": "纳入 Library / 外部管理 / 忽略"},
+          {"state": "Missing", "trigger": "Deployment 存在但目标被外部删除", "actions": "重新部署 / 解除管理"}
+        ]
+      }
+    },
+    {
+      "id": "security",
+      "type": "risks",
+      "title": "安全与文件系统边界",
+      "importance": "high",
+      "reason": "Skill 可包含代码，管理器又具有本地写权限。",
+      "sourceRefs": ["fact-scripts-executable", "assumption-no-script-execution"],
+      "reading": {"role": "core", "group": "delivery"},
+      "representation": {"kind": "table", "engine": "native", "reason": "风险和规则逐项对应。"},
+      "content": {
+        "columns": [
+          {"key": "risk", "label": "风险"},
+          {"key": "rule", "label": "V1 规则"}
+        ],
+        "rows": [
+          {"risk": "恶意/未知 scripts", "rule": "扫描、预览、同步阶段永不执行；导入时展示可执行文件清单与 Source"},
+          {"risk": "路径穿越/符号链接逃逸", "rule": "canonicalize 后检查必须位于允许 Target Root；默认不追随越界 symlink"},
+          {"risk": "误删用户文件", "rule": "只删除 Deployment manifest 明确拥有的路径；unmanaged 内容不自动删除"},
+          {"risk": "同步中断", "rule": "staging + snapshot + atomic replace；记录 before/after hash"},
+          {"risk": "私有 Git 凭据", "rule": "不存普通 SQLite；使用系统凭据存储或 Git credential helper"}
+        ]
+      }
+    },
+    {
+      "id": "decisions",
+      "type": "decisions",
+      "title": "开发前关键决策",
+      "importance": "high",
+      "reason": "这些决策后置会导致数据库、同步逻辑或 UI 返工。",
+      "reading": {"role": "core", "group": "decisions"},
+      "representation": {"kind": "table", "engine": "native", "reason": "决策集中评审。"},
+      "content": {
+        "columns": [
+          {"key": "topic", "label": "问题"},
+          {"key": "default", "label": "建议默认"},
+          {"key": "why", "label": "原因"}
+        ],
+        "rows": [
+          {"topic": "事实源是谁", "default": "Canonical Library", "why": "Agent 目录只做实例"},
+          {"topic": "发现是否自动接管", "default": "否", "why": "先 Unmanaged，再 Adopt"},
+          {"topic": "默认同步模式", "default": "Copy + Hash", "why": "跨平台比 symlink 稳定"},
+          {"topic": "写入是否自动执行", "default": "必须先显示 Sync Plan", "why": "覆盖和删除需要明确确认"},
+          {"topic": "自动更新策略", "default": "自动检查，手动应用", "why": "避免静默覆盖"},
+          {"topic": "Agent 专有能力", "default": "Portable Core + Target Overlay", "why": "不污染标准 Skill"},
+          {"topic": "Group 层级", "default": "V1 单层", "why": "减少无价值复杂度"},
+          {"topic": "Bundle 冲突判定", "default": "显式关系优先", "why": "V1 不让 LLM 自动决定冲突"},
+          {"topic": "项目级 Skill", "default": "AgentTarget + Scope", "why": "User/Project/Plugin 等 Scope 必须区分"}
+        ]
+      }
+    },
+    {
+      "id": "implementation",
+      "type": "non_functional",
+      "title": "工程实现建议",
+      "importance": "medium",
+      "reason": "需要提供可落地但不过度绑定版本的实现基线。",
+      "reading": {"role": "detail", "group": "details"},
+      "representation": {"kind": "table", "engine": "native", "reason": "模块与职责对照。"},
+      "content": {
+        "columns": [
+          {"key": "area", "label": "模块"},
+          {"key": "proposal", "label": "建议"}
+        ],
+        "rows": [
+          {"area": "Desktop Shell", "proposal": "Tauri 2 + React + TypeScript；UI 只调用受控 command"},
+          {"area": "Domain / IO", "proposal": "Rust：Discovery、Hasher、File Ops、Snapshot、Adapter、Watcher"},
+          {"area": "Metadata", "proposal": "SQLite；UUID 主键，contentHash/source revision 只做版本与重复判断"},
+          {"area": "Search", "proposal": "SQLite FTS 或内存索引即可"},
+          {"area": "Git Source", "proposal": "Source Provider 接口；commit SHA + contentHash，不依赖 Release/Tag"},
+          {"area": "Observability", "proposal": "本地 structured operation log；默认不上传 Skill 内容"}
+        ]
+      }
+    },
+    {
+      "id": "delivery-plan",
+      "type": "rollout",
+      "title": "V1 开发拆分",
+      "importance": "high",
+      "reason": "先证明发现和同步闭环，再扩展目标与来源。",
+      "reading": {"role": "core", "group": "delivery"},
+      "representation": {"kind": "table", "engine": "native", "reason": "阶段与验收对应。"},
+      "content": {
+        "columns": [
+          {"key": "phase", "label": "阶段"},
+          {"key": "scope", "label": "范围"},
+          {"key": "accept", "label": "完成标准"}
+        ],
+        "rows": [
+          {"phase": "M1 Library + UI", "scope": "五页面骨架、导入、Skills 列表/详情、Group、SQLite", "accept": "Unmanaged 与 Managed 清晰可辨"},
+          {"phase": "M2 Discovery", "scope": "Claude Adapter、手动 roots、SkillInstance、watcher", "accept": "发现 User/Project Skills 且不自动接管"},
+          {"phase": "M3 Bundle + Planner", "scope": "Bundle、relations、Sync Plan、Diff、ownership", "accept": "任何写入前可看到完整计划"},
+          {"phase": "M4 Safe Apply", "scope": "Snapshot、staging、atomic replace、verify、rollback", "accept": "中断/漂移/误删场景不丢用户原文件"},
+          {"phase": "M5 Update + 第二 Agent", "scope": "Git Source、更新状态机、第二 Adapter 或 manual-export", "accept": "Upstream/Local/Target 三线变化能正确区分"}
+        ]
+      }
+    }
+  ]
+}
