@@ -26,11 +26,45 @@
 - 简洁、高信息层级但不过载的桌面视觉基线；
 - Design Tokens 与公共 `Button`、`StatusPill`、`SearchField`、`Toggle`、`EmptyState` 等组件；
 - `Skill`、`Bundle`、`Agent`、`SyncItem`、`SourceConfig` 前端领域类型；
-- `workspaceService` 作为页面数据访问边界，M1 使用 mock，M2 可替换为 Tauri/Rust 实现；
+- `workspaceService` 作为页面数据访问边界；
 - M0 Diagnostics 已迁入 `Settings`，页面不直接访问 SQLite；
 - 1024px 附近自动收敛 Inspector，宽屏保持三栏工作台布局。
 
-M1 CI 已通过 TypeScript strict typecheck、Vite production build、Rust regression tests、Windows Tauri installer build 与 artifact upload。
+### M2 — Canonical Skill Library ✅
+
+已把 Skills 页面从“纯 mock 展示”接到真实本地 Library，完成第一条真实数据闭环：
+
+`选择 Skill 目录 → Rust 解析 SKILL.md → 校验 → 计算 identity/content hash → 复制到受管 Library → SQLite 持久化 → Skills 页面读取真实数据`
+
+已完成：
+
+- 使用 Tauri 原生目录选择器导入 Skill；
+- 前端只获得目录选择权限，文件读取、Hash、复制和数据库写入全部由 Rust command 完成；
+- 按 Agent Skills 规范解析 `SKILL.md` YAML frontmatter；
+- 校验必填 `name` / `description`，并要求 `name` 与父目录一致；
+- 读取 `license`、`compatibility`、`metadata`、`allowed-tools`；
+- 使用 canonical source path 生成稳定 Source identity，再生成稳定 Skill identity；
+- 对完整 Skill 目录生成确定性 SHA-256 content hash；
+- `.git` 不进入 Library 和 content hash；
+- 同一来源重复导入相同内容返回 `unchanged`，不会重复建档；
+- 同一来源内容变化返回 `updated`，保持 Skill ID 不变；
+- 同名但不同来源的 Skill 可以共存；
+- App Data 下建立受管 `library/`，采用 staging + replace 写入；
+- SQLite schema 升级为 v2，新增 `skill_sources` / `skills`；
+- Skills 页面显示真实来源、版本、content hash、更新时间与 scripts 安全摘要；
+- 扫描和导入过程绝不执行 `scripts/`；
+- M2 暂不跟随 symlink，并对单个 Skill 设置 2000 文件 / 100 MB 安全上限；
+- 浏览器 `npm run dev` 继续使用 mock 方便纯 UI 调试，Tauri 桌面运行时使用真实 Library。
+
+M2 自动化测试覆盖：
+
+- M0 SQLite 持久化回归；
+- 重复导入幂等；
+- Source 内容变化检测与更新；
+- 同名不同来源并存；
+- manifest `name` 与目录不一致时拒绝导入。
+
+M2 CI 已通过 TypeScript strict typecheck、Vite production build、Rust tests、Windows Tauri installer build 与 artifact upload。
 
 ## 本地开发
 
@@ -43,10 +77,10 @@ M1 CI 已通过 TypeScript strict typecheck、Vite production build、Rust regre
 ```bash
 npm install
 
-# 浏览器预览 UI；Settings 中的 Tauri Diagnostics 在浏览器不可用
+# 浏览器预览 UI；真实 Library / Tauri Diagnostics 不可用
 npm run dev
 
-# 正式桌面调试
+# 正式桌面调试，可导入真实 Skill
 npm run desktop:dev
 
 # 类型检查 + 前端构建
@@ -61,20 +95,28 @@ npm run desktop:build
 ```text
 src/
 ├── components/       # 公共 UI primitives
-├── data/             # M1 mock data
+├── data/             # 浏览器预览 / 尚未接真实数据的 mock
 ├── layout/           # App Shell
 ├── pages/            # 五个一级页面
-├── services/         # 页面数据访问 / Tauri Diagnostics 边界
+├── services/         # 页面数据访问 / Tauri command 边界
 ├── types/            # 前端领域类型
 ├── App.tsx
 └── styles.css
+
+src-tauri/src/
+├── commands.rs       # Tauri commands
+├── db.rs             # SQLite schema / repository
+├── skills.rs         # SKILL.md 解析、校验、Hash、Library 导入
+├── error.rs
+├── logging.rs
+└── lib.rs
 ```
 
-原则：页面只依赖 service，不直接操作 SQLite 或任意文件系统。M2 接真实数据时优先替换 service / Rust command，而不是重写页面。
+原则：页面只依赖 service，不直接操作 SQLite 或任意文件系统。
 
 ## CI
 
-`.github/workflows/m0-checks.yml` 目前同时作为 M0/M1 基础回归：
+`.github/workflows/m0-checks.yml` 当前作为桌面基础质量门禁：
 
 - Ubuntu：TypeScript typecheck + Vite build；
 - Windows：Frontend typecheck + Rust tests + Tauri debug installer build；
@@ -97,4 +139,4 @@ src/
 
 ## 下一步
 
-进入 **M2 — Skill Discovery + Canonical Library**：实现标准 `SKILL.md` 解析、受控目录导入、Skill identity/content hash、Library 数据模型与 SQLite 持久化，并让 `Skills` 页面从 mock service 切换到真实本地数据。
+进入 **M3 — Agent Discovery + Adapter**：先实现 Claude Code Adapter，检测本机 Claude Code、识别 User / Project Skill roots，把 Agent 目录中的 Skill 作为 `SkillInstance` 发现出来并标记为 `Unmanaged`，但不自动纳入 Canonical Library。
