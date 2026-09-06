@@ -2,7 +2,7 @@
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "Skills Control Center",
   "version": "0.1.0",
-  "identifier": "com.skillscontrolcenter.app",
+  "identifier": "com.skillscontrolcenter.desktop",
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",
@@ -29,6 +29,7 @@
   },
   "bundle": {
     "active": true,
-    "targets": "all"
+    "targets": "all",
+    "icon": ["icons/icon.ico"]
   }
 }
