@@ -1,37 +1,24 @@
-import type {
-  SkillImportCandidate,
-  SkillImportPlan,
-} from '../types/skill-lifecycle';
+import type { SkillImportCandidate, SkillImportPlan } from "../types/import";
 
 /**
  * Build a safe import plan before mutating Canonical Library.
- *
- * Import and sync are intentionally separated:
- * candidate discovery -> plan review -> execution.
+ * Discovery and adoption are deliberately separated.
  */
 export function createSkillImportPlan(
   candidates: SkillImportCandidate[],
 ): SkillImportPlan {
   const summary = candidates.reduce(
     (result, candidate) => {
-      if (candidate.action === 'add') result.add++;
-      if (candidate.action === 'update') result.update++;
-      if (candidate.action === 'skip') result.skip++;
-      if (candidate.action === 'conflict') result.conflict++;
+      result[candidate.action] += 1;
       return result;
     },
-    {
-      add: 0,
-      update: 0,
-      skip: 0,
-      conflict: 0,
-    },
+    { add: 0, update: 0, skip: 0, conflict: 0 },
   );
 
   return {
     createdAt: new Date().toISOString(),
     candidates,
     summary,
-    requiresConfirmation: summary.conflict > 0 || summary.update > 0,
+    requiresConfirmation: summary.add > 0 || summary.update > 0 || summary.conflict > 0,
   };
 }

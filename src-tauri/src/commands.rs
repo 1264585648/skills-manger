@@ -3,6 +3,7 @@ use tauri::State;
 
 use crate::{
     error::CommandError,
+    skill_preview::{self, SkillImportPreview},
     skills::{self, ImportSkillResult, SkillRecord},
     AppState,
 };
@@ -57,6 +58,15 @@ pub fn increment_counter(state: State<'_, AppState>) -> Result<CounterSnapshot, 
 #[tauri::command]
 pub fn list_library_skills(state: State<'_, AppState>) -> Result<Vec<SkillRecord>, CommandError> {
     state.db.list_skills().map_err(CommandError::from)
+}
+
+#[tauri::command]
+pub fn preview_skill_directory(
+    state: State<'_, AppState>,
+    path: String,
+) -> Result<SkillImportPreview, CommandError> {
+    skill_preview::preview_skill_directory(&state.db, &state.library_root, path)
+        .map_err(CommandError::from)
 }
 
 #[tauri::command]

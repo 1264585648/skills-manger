@@ -2,6 +2,7 @@ mod commands;
 mod db;
 mod error;
 mod logging;
+mod skill_preview;
 mod skills;
 
 use std::{fs, path::PathBuf};
@@ -46,6 +47,7 @@ pub fn run() {
             commands::get_health,
             commands::increment_counter,
             commands::list_library_skills,
+            commands::preview_skill_directory,
             commands::import_skill_directory,
         ])
         .run(tauri::generate_context!())
