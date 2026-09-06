@@ -2,8 +2,9 @@ mod commands;
 mod db;
 mod error;
 mod logging;
+mod skills;
 
-use std::fs;
+use std::{fs, path::PathBuf};
 
 use db::Database;
 use logging::AppLog;
@@ -12,13 +13,18 @@ use tauri::Manager;
 pub struct AppState {
     db: Database,
     log: AppLog,
+    library_root: PathBuf,
 }
 
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             let app_data_dir = app.path().app_data_dir()?;
             fs::create_dir_all(&app_data_dir)?;
+
+            let library_root = app_data_dir.join("library");
+            fs::create_dir_all(&library_root)?;
 
             let log = AppLog::new(app_data_dir.join("skills-manager.log"))?;
             let db = Database::initialize(app_data_dir.join("skills-manager.sqlite3"))?;
@@ -29,12 +35,18 @@ pub fn run() {
                 &format!("Skills Control Center {}", env!("CARGO_PKG_VERSION")),
             );
 
-            app.manage(AppState { db, log });
+            app.manage(AppState {
+                db,
+                log,
+                library_root,
+            });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             commands::get_health,
-            commands::increment_counter
+            commands::increment_counter,
+            commands::list_library_skills,
+            commands::import_skill_directory,
         ])
         .run(tauri::generate_context!())
         .expect("failed to run Skills Control Center");

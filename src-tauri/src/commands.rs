@@ -1,7 +1,11 @@
 use serde::Serialize;
 use tauri::State;
 
-use crate::{error::CommandError, AppState};
+use crate::{
+    error::CommandError,
+    skills::{self, ImportSkillResult, SkillRecord},
+    AppState,
+};
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -48,4 +52,29 @@ pub fn increment_counter(state: State<'_, AppState>) -> Result<CounterSnapshot, 
     );
 
     Ok(CounterSnapshot { value })
+}
+
+#[tauri::command]
+pub fn list_library_skills(state: State<'_, AppState>) -> Result<Vec<SkillRecord>, CommandError> {
+    state.db.list_skills().map_err(CommandError::from)
+}
+
+#[tauri::command]
+pub fn import_skill_directory(
+    state: State<'_, AppState>,
+    path: String,
+) -> Result<ImportSkillResult, CommandError> {
+    let result = skills::import_skill_directory(&state.db, &state.library_root, path)
+        .map_err(CommandError::from)?;
+
+    let _ = state.log.write(
+        "info",
+        "skill_imported",
+        &format!(
+            "{}: {} ({})",
+            result.outcome, result.skill.name, result.skill.source_locator
+        ),
+    );
+
+    Ok(result)
 }

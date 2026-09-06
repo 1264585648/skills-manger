@@ -7,6 +7,9 @@ export interface Skill {
   name: string;
   description: string;
   source: string;
+  sourcePath?: string;
+  libraryPath?: string;
+  contentHash?: string;
   version: string;
   status: SkillStatus;
   groups: string[];
@@ -14,6 +17,9 @@ export interface Skill {
   targets: string[];
   lastUpdated: string;
   security: string;
+  license?: string;
+  compatibility?: string;
+  allowedTools?: string;
 }
 
 export interface Bundle {

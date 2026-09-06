@@ -12,6 +12,12 @@ pub enum AppError {
     #[error("serialization error: {0}")]
     Serialization(#[from] serde_json::Error),
 
+    #[error("YAML parse error: {0}")]
+    Yaml(#[from] serde_yaml::Error),
+
+    #[error("invalid skill: {0}")]
+    InvalidSkill(String),
+
     #[error("{0}")]
     State(String),
 }
@@ -29,6 +35,8 @@ impl From<AppError> for CommandError {
             AppError::Database(_) => "database_error",
             AppError::Io(_) => "filesystem_error",
             AppError::Serialization(_) => "serialization_error",
+            AppError::Yaml(_) => "invalid_skill",
+            AppError::InvalidSkill(_) => "invalid_skill",
             AppError::State(_) => "state_error",
         };
 
