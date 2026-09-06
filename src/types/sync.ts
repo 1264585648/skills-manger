@@ -1,7 +1,4 @@
-export type SyncTarget =
-  | "claude-code"
-  | "codex"
-  | "cursor";
+export type SyncTarget = "claude-code" | "codex" | "cursor";
 
 export type SyncStatus =
   | "ready"
@@ -10,17 +7,25 @@ export type SyncStatus =
   | "failed"
   | "completed";
 
+export type SyncPlanAction = "add" | "update" | "unchanged" | "conflict";
+export type SyncConflictResolution = "library" | "target";
+
 export interface SyncPlanItem {
-  skillId: string;
+  id: string;
   skillName: string;
   target: SyncTarget;
+  action: SyncPlanAction;
   status: SyncStatus;
-  fromVersion?: string;
-  toVersion?: string;
+  currentVersion: string;
+  targetVersion: string;
+  reason: string;
 }
 
 export interface SyncPlan {
+  id: string;
   createdAt: string;
+  target: SyncTarget;
+  targetLabel: string;
   items: SyncPlanItem[];
   requiresConfirmation: boolean;
 }
