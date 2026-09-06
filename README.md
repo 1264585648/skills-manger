@@ -4,6 +4,12 @@
 
 当前产品定义为一个 **local-first Skills Control Center**：统一发现本机 Skill 与 Agent，在 Canonical Library 中管理 Skill、Group、Bundle、版本和关系，再通过 Agent Adapter 安全同步到不同目标环境。
 
+## UI 原型
+
+- [高保真交互原型](docs/ui/index.html)
+
+当前 UI 基线覆盖 5 个核心页面：Skills、Bundles、Agents、Sync、Settings。设计方向强调 **简单、有设计感、桌面工具感**，避免传统后台管理系统的信息堆积；原型保留页面切换、搜索、选中、冲突处理、来源选择与设置开关等基础交互。
+
 ## 技术方案
 
 - [人类阅读版技术方案](docs/technical-solution.html)
@@ -32,4 +38,4 @@
 
 ## 当前状态
 
-项目处于技术方案与产品设计阶段。建议下一步先完成五个核心页面的高保真 UI 与交互约束，再进入 M1 Library + UI 实现。
+技术方案与高保真 UI 原型已完成，可进入 M1：Library + UI 项目骨架实现，并以 `docs/ui/index.html` 作为视觉与交互基线。
