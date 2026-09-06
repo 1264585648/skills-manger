@@ -6,19 +6,31 @@
 
 ## 当前进度
 
-### M0 — Engineering Foundation
+### M0 — Engineering Foundation ✅
 
-M0 已落地工程骨架：
+已完成：
 
 - Tauri 2 + React + TypeScript + Vite；
 - Rust command 层，前端通过 `invoke` 调用；
-- SQLite（`rusqlite` + bundled SQLite）本地读写；
-- App Data 目录中的 JSON Lines 本地日志；
-- 基础内部错误模型 + 可序列化 command error；
-- Windows 桌面构建与 installer CI；
-- M0 启动页可直接验证 Tauri Bridge 和 SQLite 持久化写入。
+- SQLite（`rusqlite` + bundled SQLite）本地读写与持久化测试；
+- App Data 目录 JSON Lines 本地日志；
+- 基础错误模型；
+- Windows desktop / installer CI。
 
-M0 **不提前实现 M1 的正式五页面 UI**。高保真原型仍作为下一阶段视觉基线。
+### M1 — React UI Baseline ✅
+
+已把确认过的高保真方向落成真实 React UI，而不是继续使用静态 HTML 原型：
+
+- 统一 App Shell 与左侧一级导航；
+- `Skills`、`Bundles`、`Agents`、`Sync`、`Settings` 五个真实页面；
+- 简洁、高信息层级但不过载的桌面视觉基线；
+- Design Tokens 与公共 `Button`、`StatusPill`、`SearchField`、`Toggle`、`EmptyState` 等组件；
+- `Skill`、`Bundle`、`Agent`、`SyncItem`、`SourceConfig` 前端领域类型；
+- `workspaceService` 作为页面数据访问边界，M1 使用 mock，M2 可替换为 Tauri/Rust 实现；
+- M0 Diagnostics 已迁入 `Settings`，页面不直接访问 SQLite；
+- 1024px 附近自动收敛 Inspector，宽屏保持三栏工作台布局。
+
+M1 CI 已通过 TypeScript strict typecheck、Vite production build、Rust regression tests、Windows Tauri installer build 与 artifact upload。
 
 ## 本地开发
 
@@ -31,7 +43,7 @@ M0 **不提前实现 M1 的正式五页面 UI**。高保真原型仍作为下一
 ```bash
 npm install
 
-# 浏览器仅预览前端壳；Tauri invoke 不会生效
+# 浏览器预览 UI；Settings 中的 Tauri Diagnostics 在浏览器不可用
 npm run dev
 
 # 正式桌面调试
@@ -44,20 +56,28 @@ npm run build
 npm run desktop:build
 ```
 
-启动桌面应用后，M0 页面应显示：
+## 代码结构
 
-1. `Rust Command = Connected`；
-2. `SQLite = Ready`；
-3. SQLite 数据文件与日志文件的本地路径；
-4. 点击“写入 SQLite +1”后计数增加；
-5. 关闭并重新打开应用后，计数仍保留。
+```text
+src/
+├── components/       # 公共 UI primitives
+├── data/             # M1 mock data
+├── layout/           # App Shell
+├── pages/            # 五个一级页面
+├── services/         # 页面数据访问 / Tauri Diagnostics 边界
+├── types/            # 前端领域类型
+├── App.tsx
+└── styles.css
+```
+
+原则：页面只依赖 service，不直接操作 SQLite 或任意文件系统。M2 接真实数据时优先替换 service / Rust command，而不是重写页面。
 
 ## CI
 
-`.github/workflows/m0-checks.yml`：
+`.github/workflows/m0-checks.yml` 目前同时作为 M0/M1 基础回归：
 
 - Ubuntu：TypeScript typecheck + Vite build；
-- Windows：Rust tests + Tauri debug installer build；
+- Windows：Frontend typecheck + Rust tests + Tauri debug installer build；
 - Windows installer bundle 作为 Actions artifact 上传。
 
 ## 技术方案与 UI
@@ -65,17 +85,6 @@ npm run desktop:build
 - [人类阅读版技术方案](docs/technical-solution.html)
 - [结构化方案源 `solution.json`](docs/solution.json)
 - [高保真交互 UI 原型](docs/ui/index.html)
-
-技术方案重点覆盖：
-
-- 5 个一级页面：Skills、Groups & Bundles、Agents、Sync、Settings；
-- Agent / Skill Discovery；
-- Canonical Library 与 SkillInstance 分离；
-- Group 与 Bundle 的职责边界；
-- Agent Adapter + Capability Matrix；
-- Sync Plan、Diff、Snapshot、Atomic Apply、Verify、Rollback；
-- Upstream Update、Local Modified、Target Drift、Conflict、Unmanaged、Missing；
-- Git Source、Watcher/Reconcile、安全与文件系统边界。
 
 ## V1 核心原则
 
@@ -88,4 +97,4 @@ npm run desktop:build
 
 ## 下一步
 
-进入 **M1 — UI 基线**：把 `docs/ui/index.html` 中已经确认的 5 个页面视觉基线拆成真实 React 组件，并保持 M0 的 Rust / SQLite 边界不被 UI 直接绕过。
+进入 **M2 — Skill Discovery + Canonical Library**：实现标准 `SKILL.md` 解析、受控目录导入、Skill identity/content hash、Library 数据模型与 SQLite 持久化，并让 `Skills` 页面从 mock service 切换到真实本地数据。
