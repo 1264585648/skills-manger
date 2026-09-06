@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { ImportWizard } from "../components/ImportWizard";
 import { Button, EmptyState, PageHeader, SearchField, StatusPill } from "../components/ui";
 import { workspaceService } from "../services/workspaceService";
 import type { Skill, SkillStatus } from "../types/domain";
+import type { SkillImportPlan } from "../types/import";
 
 const statusMeta: Record<SkillStatus, { label: string; tone: "green" | "amber" | "red" | "blue" | "gray" }> = {
   clean: { label: "Clean", tone: "green" },
@@ -19,7 +21,9 @@ export function SkillsPage() {
   const [group, setGroup] = useState("全部");
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
-  const [importing, setImporting] = useState(false);
+  const [preparingImport, setPreparingImport] = useState(false);
+  const [executingImport, setExecutingImport] = useState(false);
+  const [importPlan, setImportPlan] = useState<SkillImportPlan | null>(null);
   const [notice, setNotice] = useState<Notice>(null);
 
   const loadSkills = useCallback(async () => {
@@ -41,30 +45,49 @@ export function SkillsPage() {
     void loadSkills();
   }, [loadSkills]);
 
-  const handleImport = async () => {
+  const handlePrepareImport = async () => {
     setNotice(null);
-    setImporting(true);
+    setPreparingImport(true);
     try {
-      const result = await workspaceService.importSkillFromPicker();
-      if (!result) return;
+      const plan = await workspaceService.previewSkillFromPicker();
+      if (plan) setImportPlan(plan);
+    } catch (error) {
+      setNotice({
+        tone: "error",
+        text: error instanceof Error ? error.message : "扫描 Skill 失败",
+      });
+    } finally {
+      setPreparingImport(false);
+    }
+  };
 
-      const label =
-        result.outcome === "created"
-          ? "已纳入 Library"
-          : result.outcome === "updated"
-            ? "已更新 Library 副本"
-            : "内容未变化";
+  const handleConfirmImport = async () => {
+    if (!importPlan) return;
+    const mutationCount = importPlan.summary.add + importPlan.summary.update;
+    if (mutationCount === 0) {
+      setImportPlan(null);
+      setNotice({ tone: "success", text: "来源内容与 Library 一致，无需更新。" });
+      return;
+    }
 
-      setNotice({ tone: "success", text: `${result.skill.name}：${label}` });
+    setExecutingImport(true);
+    try {
+      const results = await workspaceService.executeImportPlan(importPlan);
       await loadSkills();
-      setSelectedId(result.skill.id);
+      const last = results.at(-1);
+      if (last) setSelectedId(last.skill.id);
+      setImportPlan(null);
+      setNotice({
+        tone: "success",
+        text: `导入完成：新增 ${importPlan.summary.add}，更新 ${importPlan.summary.update}。`,
+      });
     } catch (error) {
       setNotice({
         tone: "error",
         text: error instanceof Error ? error.message : "导入失败",
       });
     } finally {
-      setImporting(false);
+      setExecutingImport(false);
     }
   };
 
@@ -95,8 +118,12 @@ export function SkillsPage() {
       title="Skills"
       subtitle="统一管理本地 Skills 资产、来源与状态。"
       actions={
-        <Button variant="primary" disabled={importing} onClick={() => void handleImport()}>
-          {importing ? "导入中…" : "＋ 导入 Skill"}
+        <Button
+          variant="primary"
+          disabled={preparingImport || executingImport}
+          onClick={() => void handlePrepareImport()}
+        >
+          {preparingImport ? "扫描中…" : "＋ 导入 Skill"}
         </Button>
       }
     />
@@ -199,5 +226,14 @@ export function SkillsPage() {
         </> : null}
       </aside>
     </div>
+
+    {importPlan ? (
+      <ImportWizard
+        busy={executingImport}
+        plan={importPlan}
+        onCancel={() => setImportPlan(null)}
+        onConfirm={() => void handleConfirmImport()}
+      />
+    ) : null}
   </section>;
 }
