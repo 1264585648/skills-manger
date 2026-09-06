@@ -1,4 +1,5 @@
 import type { AgentAdapter } from "../types/adapter";
+import { ClaudeCodeDetector } from "./claude-code";
 
 export const agentAdapters: AgentAdapter[] = [
   {
@@ -16,3 +17,7 @@ export const agentAdapters: AgentAdapter[] = [
     detected: false,
   },
 ];
+
+export const agentDetectors = {
+  "claude-code": new ClaudeCodeDetector(),
+};
