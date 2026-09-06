@@ -1,8 +1,17 @@
-export type SkillImportAction =
-  | 'add'
-  | 'update'
-  | 'skip'
-  | 'conflict';
+import type { SkillSource } from "./skill-lifecycle";
+
+export type SkillImportAction = "add" | "update" | "skip" | "conflict";
+
+export interface SkillImportCandidate {
+  path: string;
+  name: string;
+  description: string;
+  source: SkillSource;
+  action: SkillImportAction;
+  reason: string;
+  contentHash: string;
+  existingSkillId?: string;
+}
 
 export interface SkillImportSummary {
   add: number;
@@ -13,7 +22,7 @@ export interface SkillImportSummary {
 
 export interface SkillImportPlan {
   createdAt: string;
-  candidates: unknown[];
+  candidates: SkillImportCandidate[];
   summary: SkillImportSummary;
   requiresConfirmation: boolean;
 }
