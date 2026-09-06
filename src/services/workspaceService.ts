@@ -1,7 +1,9 @@
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import { mockAgents, mockBundles, mockSkills, mockSources, mockSyncItems } from "../data/mock";
+import { createSkillImportPlan } from "./importPlanService";
 import type { Agent, Bundle, Skill, SourceConfig, SyncItem } from "../types/domain";
+import type { SkillImportCandidate, SkillImportPlan } from "../types/import";
 
 type LibrarySkillRecord = {
   id: string;
@@ -18,6 +20,17 @@ type LibrarySkillRecord = {
   scriptCount: number;
   importedAt: number;
   updatedAt: number;
+};
+
+type SkillImportPreviewRecord = {
+  path: string;
+  name: string;
+  description: string;
+  source: "local";
+  action: SkillImportCandidate["action"];
+  reason: string;
+  contentHash: string;
+  existingSkillId: string | null;
 };
 
 export type ImportSkillResult = {
@@ -71,6 +84,12 @@ const formatCommandError = (error: unknown): string => {
   return "操作失败";
 };
 
+const ensureDesktop = (): void => {
+  if (!isTauriRuntime()) {
+    throw new Error("此操作需要在桌面应用中执行");
+  }
+};
+
 export const workspaceService = {
   async getSkills(): Promise<Skill[]> {
     if (!isTauriRuntime()) return copy(mockSkills);
@@ -78,25 +97,50 @@ export const workspaceService = {
     return records.map(mapLibrarySkill);
   },
 
-  async importSkillFromPicker(): Promise<ImportSkillResult | null> {
-    if (!isTauriRuntime()) {
-      throw new Error("导入 Skill 需要在桌面应用中执行");
-    }
-
-    const path = await open({
+  async pickSkillDirectory(): Promise<string | null> {
+    ensureDesktop();
+    const selection = await open({
       directory: true,
       multiple: false,
       title: "选择包含 SKILL.md 的 Skill 目录",
     });
+    if (!selection) return null;
+    return Array.isArray(selection) ? selection[0] ?? null : selection;
+  },
 
-    if (!path) return null;
+  async previewSkillDirectory(path: string): Promise<SkillImportPlan> {
+    ensureDesktop();
+    try {
+      const preview = await invoke<SkillImportPreviewRecord>("preview_skill_directory", { path });
+      return createSkillImportPlan([
+        {
+          path: preview.path,
+          name: preview.name,
+          description: preview.description,
+          source: preview.source,
+          action: preview.action,
+          reason: preview.reason,
+          contentHash: preview.contentHash,
+          existingSkillId: preview.existingSkillId ?? undefined,
+        },
+      ]);
+    } catch (error) {
+      throw new Error(formatCommandError(error));
+    }
+  },
 
+  async previewSkillFromPicker(): Promise<SkillImportPlan | null> {
+    const path = await this.pickSkillDirectory();
+    return path ? this.previewSkillDirectory(path) : null;
+  },
+
+  async importSkillDirectory(path: string): Promise<ImportSkillResult> {
+    ensureDesktop();
     try {
       const result = await invoke<{
         outcome: ImportSkillResult["outcome"];
         skill: LibrarySkillRecord;
       }>("import_skill_directory", { path });
-
       return {
         outcome: result.outcome,
         skill: mapLibrarySkill(result.skill),
@@ -104,6 +148,27 @@ export const workspaceService = {
     } catch (error) {
       throw new Error(formatCommandError(error));
     }
+  },
+
+  async executeImportPlan(plan: SkillImportPlan): Promise<ImportSkillResult[]> {
+    const blocked = plan.candidates.filter((candidate) => candidate.action === "conflict");
+    if (blocked.length > 0) {
+      throw new Error("导入计划仍有冲突，请先解决后再执行");
+    }
+
+    const executable = plan.candidates.filter(
+      (candidate) => candidate.action === "add" || candidate.action === "update",
+    );
+    const results: ImportSkillResult[] = [];
+    for (const candidate of executable) {
+      results.push(await this.importSkillDirectory(candidate.path));
+    }
+    return results;
+  },
+
+  async importSkillFromPicker(): Promise<ImportSkillResult | null> {
+    const path = await this.pickSkillDirectory();
+    return path ? this.importSkillDirectory(path) : null;
   },
 
   async getBundles(): Promise<Bundle[]> { return copy(mockBundles); },
