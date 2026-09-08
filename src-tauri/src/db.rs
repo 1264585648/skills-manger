@@ -6,6 +6,9 @@ use crate::{
     agent_discovery::{
         AgentTargetRecord, DiscoveryRootRecord, SkillInstanceDraft, SkillInstanceRecord,
     },
+    bundle_planner::{
+        new_bundle_id, validate_bundle_draft, BundleDraft, BundleItemRecord, BundleRecord,
+    },
     error::AppError,
     skills::{SkillDraft, SkillRecord},
 };
@@ -123,8 +126,27 @@ impl Database {
             CREATE INDEX IF NOT EXISTS idx_skill_instances_name
             ON skill_instances(name);
 
+            CREATE TABLE IF NOT EXISTS bundles (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL COLLATE NOCASE UNIQUE,
+                description TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS bundle_items (
+                bundle_id TEXT NOT NULL,
+                skill_id TEXT NOT NULL,
+                mode TEXT NOT NULL CHECK(mode IN ('required', 'optional')),
+                position INTEGER NOT NULL,
+                PRIMARY KEY(bundle_id, skill_id),
+                UNIQUE(bundle_id, position),
+                FOREIGN KEY(bundle_id) REFERENCES bundles(id) ON DELETE CASCADE,
+                FOREIGN KEY(skill_id) REFERENCES skills(id) ON DELETE RESTRICT
+            );
+
             INSERT INTO schema_meta (key, value)
-            VALUES ('schema_version', '3')
+            VALUES ('schema_version', '4')
             ON CONFLICT(key) DO UPDATE SET value = excluded.value;
             ",
         )?;
@@ -386,6 +408,96 @@ impl Database {
         Ok(())
     }
 
+    pub fn list_bundles(&self) -> Result<Vec<BundleRecord>, AppError> {
+        let connection = self.connect()?;
+        let mut statement = connection.prepare(
+            "SELECT id, name, description, created_at, updated_at
+             FROM bundles ORDER BY updated_at DESC, name ASC",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, i64>(4)?,
+            ))
+        })?;
+        let headers = rows.collect::<Result<Vec<_>, _>>()?;
+        let mut bundles = Vec::with_capacity(headers.len());
+        for (id, name, description, created_at, updated_at) in headers {
+            bundles.push(BundleRecord {
+                items: Self::bundle_items(&connection, &id)?,
+                id,
+                name,
+                description,
+                created_at,
+                updated_at,
+            });
+        }
+        Ok(bundles)
+    }
+
+    pub fn upsert_bundle(
+        &self,
+        draft: &BundleDraft,
+        timestamp: i64,
+    ) -> Result<BundleRecord, AppError> {
+        validate_bundle_draft(draft)?;
+        let id = draft
+            .id
+            .clone()
+            .unwrap_or_else(|| new_bundle_id(&draft.name, timestamp));
+        let mut connection = self.connect()?;
+        let transaction = connection.transaction()?;
+
+        for item in &draft.items {
+            let exists: bool = transaction.query_row(
+                "SELECT EXISTS(SELECT 1 FROM skills WHERE id = ?1)",
+                params![item.skill_id],
+                |row| row.get(0),
+            )?;
+            if !exists {
+                return Err(AppError::State(format!(
+                    "Library Skill was not found: {}",
+                    item.skill_id
+                )));
+            }
+        }
+
+        transaction.execute(
+            "INSERT INTO bundles (id, name, description, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?4)
+             ON CONFLICT(id) DO UPDATE SET
+                 name = excluded.name,
+                 description = excluded.description,
+                 updated_at = excluded.updated_at",
+            params![id, draft.name.trim(), draft.description.trim(), timestamp],
+        )?;
+        transaction.execute("DELETE FROM bundle_items WHERE bundle_id = ?1", params![id])?;
+        for (position, item) in draft.items.iter().enumerate() {
+            transaction.execute(
+                "INSERT INTO bundle_items (bundle_id, skill_id, mode, position)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![id, item.skill_id, item.mode, position as i64],
+            )?;
+        }
+        transaction.commit()?;
+
+        self.bundle_by_id(&id)?.ok_or_else(|| {
+            AppError::State("bundle upsert completed but record is missing".to_string())
+        })
+    }
+
+    pub fn delete_bundle(&self, id: &str) -> Result<(), AppError> {
+        let connection = self.connect()?;
+        let changed = connection.execute("DELETE FROM bundles WHERE id = ?1", params![id])?;
+        if changed == 0 {
+            return Err(AppError::State("bundle was not found".to_string()));
+        }
+        Ok(())
+    }
+
     pub fn list_skills(&self) -> Result<Vec<SkillRecord>, AppError> {
         let connection = self.connect()?;
         let mut statement = connection.prepare(
@@ -571,6 +683,51 @@ impl Database {
             )
             .optional()?)
     }
+
+    fn bundle_by_id(&self, id: &str) -> Result<Option<BundleRecord>, AppError> {
+        let connection = self.connect()?;
+        let header = connection
+            .query_row(
+                "SELECT id, name, description, created_at, updated_at FROM bundles WHERE id = ?1",
+                params![id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, i64>(3)?,
+                        row.get::<_, i64>(4)?,
+                    ))
+                },
+            )
+            .optional()?;
+        match header {
+            Some((id, name, description, created_at, updated_at)) => Ok(Some(BundleRecord {
+                items: Self::bundle_items(&connection, &id)?,
+                id,
+                name,
+                description,
+                created_at,
+                updated_at,
+            })),
+            None => Ok(None),
+        }
+    }
+
+    fn bundle_items(connection: &Connection, bundle_id: &str) -> Result<Vec<BundleItemRecord>, AppError> {
+        let mut statement = connection.prepare(
+            "SELECT skill_id, mode, position FROM bundle_items
+             WHERE bundle_id = ?1 ORDER BY position ASC",
+        )?;
+        let rows = statement.query_map(params![bundle_id], |row| {
+            Ok(BundleItemRecord {
+                skill_id: row.get(0)?,
+                mode: row.get(1)?,
+                position: row.get(2)?,
+            })
+        })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
 }
 
 fn row_to_skill(row: &Row<'_>) -> rusqlite::Result<SkillRecord> {
@@ -602,6 +759,8 @@ mod tests {
     use crate::agent_discovery::{
         AgentTargetRecord, DiscoveryRootRecord, SkillInstanceDraft,
     };
+    use crate::bundle_planner::{BundleDraft, BundleItemDraft};
+    use crate::skills::SkillDraft;
 
     use super::Database;
 
@@ -703,7 +862,7 @@ mod tests {
             reopened
                 .schema_version()
                 .expect("schema version should read"),
-            "3"
+            "4"
         );
         assert_eq!(
             reopened.list_agent_targets().expect("targets should list"),
@@ -721,6 +880,86 @@ mod tests {
         assert_eq!(instances[0].state, "unmanaged");
         assert_eq!(instances[0].first_discovered_at, timestamp);
         assert_eq!(instances[0].last_discovered_at, timestamp);
+
+        drop(reopened);
+        let _ = fs::remove_dir_all(test_dir);
+    }
+
+    #[test]
+    fn bundle_records_replace_items_transactionally_and_persist() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be valid")
+            .as_nanos();
+        let test_dir = std::env::temp_dir().join(format!(
+            "skills-manger-m4-db-{}-{nonce}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&test_dir).expect("test directory should exist");
+        let database_path = test_dir.join("m4.sqlite3");
+        let database = Database::initialize(&database_path).expect("database should initialize");
+        for id in ["skill-a", "skill-b"] {
+            database
+                .upsert_skill(&SkillDraft {
+                    id: id.to_string(),
+                    source_id: format!("source-{id}"),
+                    source_kind: "local".to_string(),
+                    source_locator: format!("C:/fixtures/{id}"),
+                    relative_path: ".".to_string(),
+                    name: id.to_string(),
+                    description: "Fixture".to_string(),
+                    version: None,
+                    license: None,
+                    compatibility: None,
+                    allowed_tools: None,
+                    metadata_json: "{}".to_string(),
+                    content_hash: format!("hash-{id}"),
+                    library_path: format!("C:/library/{id}"),
+                    script_count: 0,
+                    timestamp: 10,
+                })
+                .expect("skill should persist");
+        }
+        let created = database
+            .upsert_bundle(
+                &BundleDraft {
+                    id: None,
+                    name: "Development".to_string(),
+                    description: "Fixture bundle".to_string(),
+                    items: vec![BundleItemDraft {
+                        skill_id: "skill-a".to_string(),
+                        mode: "required".to_string(),
+                    }],
+                },
+                20,
+            )
+            .expect("bundle should persist");
+        database
+            .upsert_bundle(
+                &BundleDraft {
+                    id: Some(created.id.clone()),
+                    name: created.name.clone(),
+                    description: "Updated fixture".to_string(),
+                    items: vec![BundleItemDraft {
+                        skill_id: "skill-b".to_string(),
+                        mode: "optional".to_string(),
+                    }],
+                },
+                30,
+            )
+            .expect("bundle should update");
+        drop(database);
+
+        let reopened = Database::initialize(&database_path).expect("database should reopen");
+        let bundles = reopened.list_bundles().expect("bundles should list");
+        assert_eq!(bundles.len(), 1);
+        assert_eq!(bundles[0].id, created.id);
+        assert_eq!(bundles[0].description, "Updated fixture");
+        assert_eq!(bundles[0].items.len(), 1);
+        assert_eq!(bundles[0].items[0].skill_id, "skill-b");
+        assert_eq!(bundles[0].items[0].mode, "optional");
+        assert_eq!(bundles[0].created_at, 20);
+        assert_eq!(bundles[0].updated_at, 30);
 
         drop(reopened);
         let _ = fs::remove_dir_all(test_dir);

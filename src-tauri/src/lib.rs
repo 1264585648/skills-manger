@@ -1,4 +1,5 @@
 mod agent_discovery;
+mod bundle_planner;
 mod claude_code;
 mod commands;
 mod db;
@@ -58,6 +59,10 @@ pub fn run() {
             commands::add_discovery_root,
             commands::remove_discovery_root,
             commands::list_skill_instances,
+            commands::list_bundles,
+            commands::upsert_bundle,
+            commands::delete_bundle,
+            commands::generate_sync_plan,
         ])
         .run(tauri::generate_context!())
         .expect("failed to run Skills Control Center");

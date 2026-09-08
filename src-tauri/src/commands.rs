@@ -6,6 +6,7 @@ use crate::{
         self, AgentDiscoverySnapshot, AgentTargetRecord, DiscoveryRootRecord,
         SkillInstanceRecord,
     },
+    bundle_planner::{self, BundleDraft, BundleRecord, SyncPlanRecord},
     error::CommandError,
     skill_preview::{self, SkillImportPreview},
     skills::{self, ImportSkillResult, SkillRecord},
@@ -190,4 +191,52 @@ pub fn list_skill_instances(
     state: State<'_, AppState>,
 ) -> Result<Vec<SkillInstanceRecord>, CommandError> {
     state.db.list_skill_instances().map_err(CommandError::from)
+}
+
+#[tauri::command]
+pub fn list_bundles(state: State<'_, AppState>) -> Result<Vec<BundleRecord>, CommandError> {
+    state.db.list_bundles().map_err(CommandError::from)
+}
+
+#[tauri::command]
+pub fn upsert_bundle(
+    state: State<'_, AppState>,
+    draft: BundleDraft,
+) -> Result<BundleRecord, CommandError> {
+    let bundle = state
+        .db
+        .upsert_bundle(
+            &draft,
+            agent_discovery::unix_timestamp().map_err(CommandError::from)?,
+        )
+        .map_err(CommandError::from)?;
+    let _ = state.log.write(
+        "info",
+        "bundle_saved",
+        &format!("bundle saved: {} ({} items)", bundle.name, bundle.items.len()),
+    );
+    Ok(bundle)
+}
+
+#[tauri::command]
+pub fn delete_bundle(state: State<'_, AppState>, id: String) -> Result<(), CommandError> {
+    state.db.delete_bundle(&id).map_err(CommandError::from)?;
+    let _ = state.log.write("info", "bundle_deleted", &format!("bundle deleted: {id}"));
+    Ok(())
+}
+
+#[tauri::command]
+pub fn generate_sync_plan(
+    state: State<'_, AppState>,
+    bundle_id: String,
+    root_id: String,
+) -> Result<SyncPlanRecord, CommandError> {
+    let plan = bundle_planner::generate_sync_plan(&state.db, &bundle_id, &root_id)
+        .map_err(CommandError::from)?;
+    let _ = state.log.write(
+        "info",
+        "sync_plan_generated",
+        &format!("read-only plan {} generated with {} items", plan.id, plan.items.len()),
+    );
+    Ok(plan)
 }
