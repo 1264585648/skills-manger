@@ -1,8 +1,11 @@
 use std::path::{Path, PathBuf};
 
-use rusqlite::{params, Connection, OptionalExtension, Row, Transaction};
+use rusqlite::{params, types::Type, Connection, OptionalExtension, Row, Transaction};
 
 use crate::{
+    agent_discovery::{
+        AgentTargetRecord, DiscoveryRootRecord, SkillInstanceDraft, SkillInstanceRecord,
+    },
     error::AppError,
     skills::{SkillDraft, SkillRecord},
 };
@@ -67,8 +70,61 @@ impl Database {
             CREATE INDEX IF NOT EXISTS idx_skills_name ON skills(name);
             CREATE INDEX IF NOT EXISTS idx_skills_updated_at ON skills(updated_at DESC);
 
+            CREATE TABLE IF NOT EXISTS agent_targets (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                provider TEXT NOT NULL,
+                capabilities_json TEXT NOT NULL,
+                detected INTEGER NOT NULL DEFAULT 0,
+                executable_path TEXT,
+                version TEXT,
+                last_warning TEXT,
+                last_scanned_at INTEGER,
+                updated_at INTEGER NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS discovery_roots (
+                id TEXT PRIMARY KEY,
+                agent_id TEXT NOT NULL,
+                scope TEXT NOT NULL CHECK(scope IN ('user', 'project')),
+                configured_path TEXT NOT NULL,
+                canonical_path TEXT,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                is_default INTEGER NOT NULL DEFAULT 0,
+                last_warning TEXT,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                FOREIGN KEY(agent_id) REFERENCES agent_targets(id) ON DELETE CASCADE,
+                UNIQUE(agent_id, scope, configured_path)
+            );
+
+            CREATE TABLE IF NOT EXISTS skill_instances (
+                id TEXT PRIMARY KEY,
+                agent_id TEXT NOT NULL,
+                root_id TEXT NOT NULL,
+                scope TEXT NOT NULL CHECK(scope IN ('user', 'project')),
+                path TEXT NOT NULL,
+                name TEXT NOT NULL,
+                description TEXT NOT NULL,
+                content_hash TEXT NOT NULL,
+                script_count INTEGER NOT NULL DEFAULT 0,
+                state TEXT NOT NULL CHECK(state IN ('unmanaged', 'missing')),
+                first_discovered_at INTEGER NOT NULL,
+                last_discovered_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                FOREIGN KEY(agent_id) REFERENCES agent_targets(id) ON DELETE CASCADE,
+                FOREIGN KEY(root_id) REFERENCES discovery_roots(id) ON DELETE CASCADE,
+                UNIQUE(agent_id, scope, path)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_skill_instances_root
+            ON skill_instances(root_id, state);
+
+            CREATE INDEX IF NOT EXISTS idx_skill_instances_name
+            ON skill_instances(name);
+
             INSERT INTO schema_meta (key, value)
-            VALUES ('schema_version', '2')
+            VALUES ('schema_version', '3')
             ON CONFLICT(key) DO UPDATE SET value = excluded.value;
             ",
         )?;
@@ -125,6 +181,209 @@ impl Database {
 
         transaction.commit()?;
         Ok(next)
+    }
+
+    #[cfg(test)]
+    pub fn schema_version(&self) -> Result<String, AppError> {
+        let connection = self.connect()?;
+        Ok(connection.query_row(
+            "SELECT value FROM schema_meta WHERE key = 'schema_version'",
+            [],
+            |row| row.get(0),
+        )?)
+    }
+
+    pub fn upsert_agent_target(
+        &self,
+        record: &AgentTargetRecord,
+        timestamp: i64,
+    ) -> Result<AgentTargetRecord, AppError> {
+        let connection = self.connect()?;
+        let capabilities_json = serde_json::to_string(&record.capabilities)?;
+        connection.execute(
+            "
+            INSERT INTO agent_targets (
+                id, name, provider, capabilities_json, detected,
+                executable_path, version, last_warning, last_scanned_at, updated_at
+            )
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+            ON CONFLICT(id) DO UPDATE SET
+                name = excluded.name,
+                provider = excluded.provider,
+                capabilities_json = excluded.capabilities_json,
+                detected = excluded.detected,
+                executable_path = excluded.executable_path,
+                version = excluded.version,
+                last_warning = excluded.last_warning,
+                last_scanned_at = excluded.last_scanned_at,
+                updated_at = excluded.updated_at
+            ",
+            params![
+                record.id,
+                record.name,
+                record.provider,
+                capabilities_json,
+                record.detected,
+                record.executable_path,
+                record.version,
+                record.last_warning,
+                record.last_scanned_at,
+                timestamp,
+            ],
+        )?;
+
+        self.agent_target_by_id(&record.id)?.ok_or_else(|| {
+            AppError::State("agent target upsert completed but record is missing".to_string())
+        })
+    }
+
+    pub fn list_agent_targets(&self) -> Result<Vec<AgentTargetRecord>, AppError> {
+        let connection = self.connect()?;
+        let mut statement = connection.prepare(
+            "
+            SELECT id, name, provider, capabilities_json, detected,
+                   executable_path, version, last_warning, last_scanned_at
+            FROM agent_targets
+            ORDER BY name COLLATE NOCASE ASC
+            ",
+        )?;
+        let rows = statement.query_map([], row_to_agent_target)?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    pub fn upsert_discovery_root(
+        &self,
+        record: &DiscoveryRootRecord,
+        timestamp: i64,
+    ) -> Result<DiscoveryRootRecord, AppError> {
+        let connection = self.connect()?;
+        connection.execute(
+            "
+            INSERT INTO discovery_roots (
+                id, agent_id, scope, configured_path, canonical_path,
+                enabled, is_default, last_warning, created_at, updated_at
+            )
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+            ON CONFLICT(id) DO UPDATE SET
+                agent_id = excluded.agent_id,
+                scope = excluded.scope,
+                configured_path = excluded.configured_path,
+                canonical_path = excluded.canonical_path,
+                enabled = excluded.enabled,
+                is_default = excluded.is_default,
+                last_warning = excluded.last_warning,
+                updated_at = excluded.updated_at
+            ",
+            params![
+                record.id,
+                record.agent_id,
+                record.scope,
+                record.configured_path,
+                record.canonical_path,
+                record.enabled,
+                record.is_default,
+                record.last_warning,
+                timestamp,
+                timestamp,
+            ],
+        )?;
+
+        self.discovery_root_by_id(&record.id)?.ok_or_else(|| {
+            AppError::State("discovery root upsert completed but record is missing".to_string())
+        })
+    }
+
+    pub fn list_discovery_roots(&self) -> Result<Vec<DiscoveryRootRecord>, AppError> {
+        let connection = self.connect()?;
+        let mut statement = connection.prepare(
+            "
+            SELECT id, agent_id, scope, configured_path, canonical_path,
+                   enabled, is_default, last_warning
+            FROM discovery_roots
+            ORDER BY is_default DESC, scope ASC, configured_path COLLATE NOCASE ASC
+            ",
+        )?;
+        let rows = statement.query_map([], row_to_discovery_root)?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    pub fn remove_discovery_root(&self, id: &str) -> Result<(), AppError> {
+        let connection = self.connect()?;
+        connection.execute(
+            "DELETE FROM discovery_roots WHERE id = ?1 AND is_default = 0",
+            params![id],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_skill_instances(&self) -> Result<Vec<SkillInstanceRecord>, AppError> {
+        let connection = self.connect()?;
+        let mut statement = connection.prepare(
+            "
+            SELECT id, agent_id, root_id, scope, path, name, description,
+                   content_hash, script_count, state,
+                   first_discovered_at, last_discovered_at
+            FROM skill_instances
+            ORDER BY state ASC, name COLLATE NOCASE ASC, path COLLATE NOCASE ASC
+            ",
+        )?;
+        let rows = statement.query_map([], row_to_skill_instance)?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    pub fn reconcile_root_instances(
+        &self,
+        root_id: &str,
+        instances: &[SkillInstanceDraft],
+        timestamp: i64,
+    ) -> Result<(), AppError> {
+        let mut connection = self.connect()?;
+        let transaction = connection.transaction()?;
+        transaction.execute(
+            "UPDATE skill_instances SET state = 'missing', updated_at = ?2 WHERE root_id = ?1",
+            params![root_id, timestamp],
+        )?;
+
+        for instance in instances {
+            transaction.execute(
+                "
+                INSERT INTO skill_instances (
+                    id, agent_id, root_id, scope, path, name, description,
+                    content_hash, script_count, state,
+                    first_discovered_at, last_discovered_at, updated_at
+                )
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9,
+                        'unmanaged', ?10, ?10, ?10)
+                ON CONFLICT(id) DO UPDATE SET
+                    agent_id = excluded.agent_id,
+                    root_id = excluded.root_id,
+                    scope = excluded.scope,
+                    path = excluded.path,
+                    name = excluded.name,
+                    description = excluded.description,
+                    content_hash = excluded.content_hash,
+                    script_count = excluded.script_count,
+                    state = 'unmanaged',
+                    last_discovered_at = excluded.last_discovered_at,
+                    updated_at = excluded.updated_at
+                ",
+                params![
+                    instance.id,
+                    instance.agent_id,
+                    instance.root_id,
+                    instance.scope,
+                    instance.path,
+                    instance.name,
+                    instance.description,
+                    instance.content_hash,
+                    instance.script_count,
+                    timestamp,
+                ],
+            )?;
+        }
+
+        transaction.commit()?;
+        Ok(())
     }
 
     pub fn list_skills(&self) -> Result<Vec<SkillRecord>, AppError> {
@@ -280,6 +539,38 @@ impl Database {
         )?;
         Ok(connection)
     }
+
+    fn agent_target_by_id(&self, id: &str) -> Result<Option<AgentTargetRecord>, AppError> {
+        let connection = self.connect()?;
+        Ok(connection
+            .query_row(
+                "
+                SELECT id, name, provider, capabilities_json, detected,
+                       executable_path, version, last_warning, last_scanned_at
+                FROM agent_targets
+                WHERE id = ?1
+                ",
+                params![id],
+                row_to_agent_target,
+            )
+            .optional()?)
+    }
+
+    fn discovery_root_by_id(&self, id: &str) -> Result<Option<DiscoveryRootRecord>, AppError> {
+        let connection = self.connect()?;
+        Ok(connection
+            .query_row(
+                "
+                SELECT id, agent_id, scope, configured_path, canonical_path,
+                       enabled, is_default, last_warning
+                FROM discovery_roots
+                WHERE id = ?1
+                ",
+                params![id],
+                row_to_discovery_root,
+            )
+            .optional()?)
+    }
 }
 
 fn row_to_skill(row: &Row<'_>) -> rusqlite::Result<SkillRecord> {
@@ -306,6 +597,10 @@ mod tests {
     use std::{
         fs,
         time::{SystemTime, UNIX_EPOCH},
+    };
+
+    use crate::agent_discovery::{
+        AgentTargetRecord, DiscoveryRootRecord, SkillInstanceDraft,
     };
 
     use super::Database;
@@ -338,4 +633,145 @@ mod tests {
         drop(reopened);
         let _ = fs::remove_dir_all(test_dir);
     }
+
+    #[test]
+    fn discovery_records_persist_across_database_reopen() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock should be after epoch")
+            .as_nanos();
+        let test_dir = std::env::temp_dir().join(format!(
+            "skills-manger-m3-db-{}-{nonce}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&test_dir).expect("test directory should be created");
+        let database_path = test_dir.join("m3.sqlite3");
+        let timestamp = 1_788_777_600;
+
+        let database = Database::initialize(&database_path).expect("database should initialize");
+        let target = AgentTargetRecord {
+            id: "claude-code".to_string(),
+            name: "Claude Code".to_string(),
+            provider: "Anthropic".to_string(),
+            capabilities: vec!["detect".to_string()],
+            detected: true,
+            executable_path: Some("C:/tools/claude.exe".to_string()),
+            version: None,
+            last_warning: None,
+            last_scanned_at: Some(timestamp),
+        };
+        database
+            .upsert_agent_target(&target, timestamp)
+            .expect("target should persist");
+
+        let root = DiscoveryRootRecord {
+            id: "root-1".to_string(),
+            agent_id: target.id.clone(),
+            scope: "project".to_string(),
+            configured_path: "C:/repo/.claude/skills".to_string(),
+            canonical_path: Some("C:/repo/.claude/skills".to_string()),
+            enabled: true,
+            is_default: false,
+            last_warning: None,
+        };
+        database
+            .upsert_discovery_root(&root, timestamp)
+            .expect("root should persist");
+
+        database
+            .reconcile_root_instances(
+                &root.id,
+                &[SkillInstanceDraft {
+                    id: "instance-1".to_string(),
+                    agent_id: target.id.clone(),
+                    root_id: root.id.clone(),
+                    scope: root.scope.clone(),
+                    path: "C:/repo/.claude/skills/demo-skill".to_string(),
+                    name: "demo-skill".to_string(),
+                    description: "Persisted discovery fixture.".to_string(),
+                    content_hash: "abc123".to_string(),
+                    script_count: 0,
+                }],
+                timestamp,
+            )
+            .expect("instances should reconcile");
+        drop(database);
+
+        let reopened =
+            Database::initialize(&database_path).expect("database should reopen after close");
+        assert_eq!(
+            reopened
+                .schema_version()
+                .expect("schema version should read"),
+            "3"
+        );
+        assert_eq!(
+            reopened.list_agent_targets().expect("targets should list"),
+            vec![target]
+        );
+        assert_eq!(
+            reopened.list_discovery_roots().expect("roots should list"),
+            vec![root]
+        );
+        let instances = reopened
+            .list_skill_instances()
+            .expect("instances should list");
+        assert_eq!(instances.len(), 1);
+        assert_eq!(instances[0].id, "instance-1");
+        assert_eq!(instances[0].state, "unmanaged");
+        assert_eq!(instances[0].first_discovered_at, timestamp);
+        assert_eq!(instances[0].last_discovered_at, timestamp);
+
+        drop(reopened);
+        let _ = fs::remove_dir_all(test_dir);
+    }
+}
+
+fn row_to_agent_target(row: &Row<'_>) -> rusqlite::Result<AgentTargetRecord> {
+    let capabilities_json: String = row.get(3)?;
+    let capabilities = serde_json::from_str(&capabilities_json).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(3, Type::Text, Box::new(error))
+    })?;
+
+    Ok(AgentTargetRecord {
+        id: row.get(0)?,
+        name: row.get(1)?,
+        provider: row.get(2)?,
+        capabilities,
+        detected: row.get(4)?,
+        executable_path: row.get(5)?,
+        version: row.get(6)?,
+        last_warning: row.get(7)?,
+        last_scanned_at: row.get(8)?,
+    })
+}
+
+fn row_to_discovery_root(row: &Row<'_>) -> rusqlite::Result<DiscoveryRootRecord> {
+    Ok(DiscoveryRootRecord {
+        id: row.get(0)?,
+        agent_id: row.get(1)?,
+        scope: row.get(2)?,
+        configured_path: row.get(3)?,
+        canonical_path: row.get(4)?,
+        enabled: row.get(5)?,
+        is_default: row.get(6)?,
+        last_warning: row.get(7)?,
+    })
+}
+
+fn row_to_skill_instance(row: &Row<'_>) -> rusqlite::Result<SkillInstanceRecord> {
+    Ok(SkillInstanceRecord {
+        id: row.get(0)?,
+        agent_id: row.get(1)?,
+        root_id: row.get(2)?,
+        scope: row.get(3)?,
+        path: row.get(4)?,
+        name: row.get(5)?,
+        description: row.get(6)?,
+        content_hash: row.get(7)?,
+        script_count: row.get(8)?,
+        state: row.get(9)?,
+        first_discovered_at: row.get(10)?,
+        last_discovered_at: row.get(11)?,
+    })
 }

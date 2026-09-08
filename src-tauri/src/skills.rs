@@ -46,6 +46,7 @@ pub(crate) struct InspectedSkill {
     pub(crate) name: String,
     pub(crate) description: String,
     pub(crate) content_hash: String,
+    pub(crate) script_count: i64,
 }
 
 #[derive(Debug)]
@@ -225,12 +226,29 @@ pub(crate) fn inspect_skill(root: &Path) -> Result<InspectedSkill, AppError> {
         name: contents.name,
         description: contents.description,
         content_hash: contents.content_hash,
+        script_count: contents.script_count,
     })
 }
 
 fn inspect_skill_contents(root: &Path, expected_name: &str) -> Result<SkillContents, AppError> {
     let manifest_path = root.join("SKILL.md");
-    if !manifest_path.is_file() {
+    let manifest_metadata = match fs::symlink_metadata(&manifest_path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err(AppError::InvalidSkill(
+                "selected directory does not contain SKILL.md".to_string(),
+            ));
+        }
+        Err(error) => return Err(AppError::Io(error)),
+    };
+
+    if manifest_metadata.file_type().is_symlink() {
+        return Err(AppError::InvalidSkill(
+            "SKILL.md must be a regular file and cannot be a symbolic link".to_string(),
+        ));
+    }
+
+    if !manifest_metadata.is_file() {
         return Err(AppError::InvalidSkill(
             "selected directory does not contain SKILL.md".to_string(),
         ));
@@ -483,7 +501,7 @@ mod tests {
 
     use crate::db::Database;
 
-    use super::{hash_text, hash_tree, import_skill_directory};
+    use super::{hash_text, hash_tree, import_skill_directory, inspect_skill};
 
     fn test_root(label: &str) -> std::path::PathBuf {
         let nonce = SystemTime::now()
@@ -678,6 +696,36 @@ mod tests {
         assert_eq!(imported.skill.content_hash, managed_hash);
 
         drop(db);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn linked_manifest_is_rejected_before_parsing() {
+        let root = test_root("linked-manifest");
+        let source = root.join("source").join("demo-skill");
+        let external_manifest = root.join("external-SKILL.md");
+        fs::create_dir_all(&source).expect("source should exist");
+        fs::write(
+            &external_manifest,
+            "---\nname: demo-skill\ndescription: External manifest fixture.\n---\n",
+        )
+        .expect("external manifest should write");
+
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&external_manifest, source.join("SKILL.md"))
+            .expect("manifest symlink should be created");
+        #[cfg(windows)]
+        if std::os::windows::fs::symlink_file(&external_manifest, source.join("SKILL.md")).is_err()
+        {
+            let _ = fs::remove_dir_all(root);
+            return;
+        }
+
+        let error = inspect_skill(&source).expect_err("linked manifest should be rejected");
+        assert!(error
+            .to_string()
+            .contains("SKILL.md must be a regular file and cannot be a symbolic link"));
+
         let _ = fs::remove_dir_all(root);
     }
 }

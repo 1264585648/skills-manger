@@ -2,6 +2,10 @@ use serde::Serialize;
 use tauri::State;
 
 use crate::{
+    agent_discovery::{
+        self, AgentDiscoverySnapshot, AgentTargetRecord, DiscoveryRootRecord,
+        SkillInstanceRecord,
+    },
     error::CommandError,
     skill_preview::{self, SkillImportPreview},
     skills::{self, ImportSkillResult, SkillRecord},
@@ -87,4 +91,103 @@ pub fn import_skill_directory(
     );
 
     Ok(result)
+}
+
+#[tauri::command]
+pub fn list_agent_targets(
+    state: State<'_, AppState>,
+) -> Result<Vec<AgentTargetRecord>, CommandError> {
+    state.db.list_agent_targets().map_err(CommandError::from)
+}
+
+#[tauri::command]
+pub fn scan_claude_code(
+    state: State<'_, AppState>,
+) -> Result<AgentDiscoverySnapshot, CommandError> {
+    let snapshot = agent_discovery::scan_claude_code(&state.db, &state.library_root)
+        .map_err(CommandError::from)?;
+    let _ = state.log.write(
+        "info",
+        "claude_code_scanned",
+        &format!(
+            "{} roots scanned; {} instances recorded; {} warnings",
+            snapshot.roots.len(),
+            snapshot.instances.len(),
+            snapshot.warnings.len()
+        ),
+    );
+    Ok(snapshot)
+}
+
+#[tauri::command]
+pub fn list_discovery_roots(
+    state: State<'_, AppState>,
+) -> Result<Vec<DiscoveryRootRecord>, CommandError> {
+    state.db.list_discovery_roots().map_err(CommandError::from)
+}
+
+#[tauri::command]
+pub fn add_discovery_root(
+    state: State<'_, AppState>,
+    path: String,
+    scope: String,
+) -> Result<DiscoveryRootRecord, CommandError> {
+    if scope != "project" {
+        return Err(CommandError::from(crate::error::AppError::State(
+            "only project discovery roots can be added".to_string(),
+        )));
+    }
+    let record = agent_discovery::register_project_root(
+        &state.db,
+        &state.library_root,
+        path,
+        agent_discovery::unix_timestamp().map_err(CommandError::from)?,
+    )
+    .map_err(CommandError::from)?;
+    let _ = state.log.write(
+        "info",
+        "discovery_root_added",
+        &format!("project root registered: {}", record.configured_path),
+    );
+    Ok(record)
+}
+
+#[tauri::command]
+pub fn remove_discovery_root(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<(), CommandError> {
+    let root = state
+        .db
+        .list_discovery_roots()
+        .map_err(CommandError::from)?
+        .into_iter()
+        .find(|root| root.id == id)
+        .ok_or_else(|| {
+            CommandError::from(crate::error::AppError::State(
+                "discovery root was not found".to_string(),
+            ))
+        })?;
+    if root.is_default {
+        return Err(CommandError::from(crate::error::AppError::State(
+            "the default user discovery root cannot be removed".to_string(),
+        )));
+    }
+    state
+        .db
+        .remove_discovery_root(&root.id)
+        .map_err(CommandError::from)?;
+    let _ = state.log.write(
+        "info",
+        "discovery_root_removed",
+        &format!("discovery root registration removed: {}", root.configured_path),
+    );
+    Ok(())
+}
+
+#[tauri::command]
+pub fn list_skill_instances(
+    state: State<'_, AppState>,
+) -> Result<Vec<SkillInstanceRecord>, CommandError> {
+    state.db.list_skill_instances().map_err(CommandError::from)
 }
