@@ -171,3 +171,56 @@ allowed-tools:
 3. 提交并维护 lockfile，或明确采用不提交 lockfile 的版本策略，避免 `npm install` 后工作区天然变脏并降低可复现性。
 4. 开发机补齐 Rust stable 后再本地重跑 `cargo test` 与 `npm run desktop:dev`；本报告未自行修改环境。
 5. 使用修复后的桌面二进制和最初规范样例完整复跑本报告所有用例；全部通过后才可输出 `M2 E2E PASS`。
+
+---
+
+# Skills Manager M3 Discovery Verification
+
+测试日期：2026-09-08（Asia/Shanghai）
+
+分支：`codex/m3-agent-discovery`
+
+结论：**实现与前端验证完成；Rust 编译、桌面启动和真实 UI E2E 因本机缺少 Rust 工具链而 BLOCKED。未输出 M3 E2E PASS。**
+
+## M3 范围
+
+M3 仅实现 Claude Code 的只读发现：PATH 检测、默认 User root、显式 Project root、`SKILL.md` 检查、SkillInstance SQLite 持久化及 UI 展示。不包含 Adopt、部署、同步、watcher 或任何 Agent 文件写入。
+
+## 自动化与构建结果
+
+| 命令/检查 | 结果 | 备注 |
+|---|---|---|
+| `npm run test:frontend` | PASS | 5 passed，0 failed；包含 timestamp 和 discovery mapper |
+| `npm run build` | PASS | TypeScript 无错误；Vite 8.2.2，37 modules transformed |
+| `git diff --check` | PASS | 无 whitespace error；仅有 Git 的 CRLF 提示 |
+| `cargo test` | BLOCKED | `cargo` 不在 PATH，按项目验收约束未安装或修改环境 |
+| `cargo fmt --check` / `cargo clippy` | BLOCKED | 同上 |
+| `npm run desktop:dev` | BLOCKED | `cargo metadata --no-deps --format-version 1: program not found` |
+
+## M3 测试矩阵
+
+| 测试项 | 实现/静态检查 | 本机运行验证 | 备注 |
+|---|---|---|---|
+| Claude Code PATH 检测 | PASS | BLOCKED | 仅检查候选文件 metadata/canonical path，不启动进程 |
+| 默认 User root | PASS | BLOCKED | 登记 `~/.claude/skills`；不存在时记录 warning |
+| Project root 添加/重复添加 | PASS | BLOCKED | 只接受真实 `.claude/skills` 目录，稳定 ID 保证幂等 |
+| Skill 只读发现 | PASS | BLOCKED | 复用 M2 manifest、hash、文件数和大小边界 |
+| 无效 sibling 隔离 | PASS | BLOCKED | 单个无效 Skill 转为 root warning，不隐藏有效 sibling |
+| Missing reconciliation | PASS | BLOCKED | 仅成功读取 root 后标记消失实例；root 失败保留旧状态 |
+| SQLite v3 持久化 | PASS | BLOCKED | target/root/instance repository 与重开数据库测试已加入 |
+| UI 展示与映射 | PASS | PASS | Agent ready/setup、Unmanaged/Missing、Library 合并测试通过 |
+| scripts 不执行 | PASS | BLOCKED | 生产代码无进程启动；Rust sentinel 测试已加入但未执行 |
+| symlink 边界 | PASS | BLOCKED | root、Skill 目录、`SKILL.md` 和内容树均拒绝 symlink |
+| 移除 root 不改 Agent | PASS | BLOCKED | SQLite FK cascade 删除发现记录；命令不执行文件删除 |
+
+## M3 安全审计
+
+- `agent_discovery.rs` 与 `claude_code.rs` 不调用 `Command`、shell、spawn 或脚本。
+- 扫描限定为已登记 root 的直接子目录；root 和每个子项先检查 symlink 类型。
+- Project root 必须 canonicalize 后精确落在 `.claude/skills` 结构，且不能位于受管 Library 内。
+- 发现模块的外部状态变更仅为 SQLite；没有 `write`、`copy`、`rename`、`remove_file` 或 `remove_dir_all` 的生产调用。
+- `SKILL.md` 在读取前使用 `symlink_metadata`，manifest 本身是链接时拒绝，避免读取 root 外内容。
+
+## 待复验事项
+
+在具备 Rust stable 与 Windows Tauri 构建依赖的环境依次运行：`cargo fmt --check`、`cargo clippy --all-targets --all-features -- -D warnings`、`cargo test`、`npm run desktop:dev`。桌面 E2E 需覆盖添加临时 Project root、扫描、重启持久化、Missing、移除 root 后源文件仍存在及脚本 sentinel 不存在。

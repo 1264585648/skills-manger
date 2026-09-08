@@ -309,11 +309,11 @@
           {"key": "accept", "label": "完成标准"}
         ],
         "rows": [
-          {"phase": "M1 Library + UI", "scope": "五页面骨架、导入、Skills 列表/详情、Group、SQLite", "accept": "Unmanaged 与 Managed 清晰可辨"},
-          {"phase": "M2 Discovery", "scope": "Claude Adapter、手动 roots、SkillInstance、watcher", "accept": "发现 User/Project Skills 且不自动接管"},
-          {"phase": "M3 Bundle + Planner", "scope": "Bundle、relations、Sync Plan、Diff、ownership", "accept": "任何写入前可看到完整计划"},
-          {"phase": "M4 Safe Apply", "scope": "Snapshot、staging、atomic replace、verify、rollback", "accept": "中断/漂移/误删场景不丢用户原文件"},
-          {"phase": "M5 Update + 第二 Agent", "scope": "Git Source、更新状态机、第二 Adapter 或 manual-export", "accept": "Upstream/Local/Target 三线变化能正确区分"}
+          {"phase": "M2 Canonical Library + UI", "scope": "导入、Skills 列表/详情、SQLite 与受管 Library", "accept": "重复导入、更新与同名来源行为稳定"},
+          {"phase": "M3 Agent Discovery", "scope": "Claude Code 检测、手动 roots、SkillInstance", "accept": "发现 User/Project Skills 且不自动接管"},
+          {"phase": "M4 Bundle + Planner", "scope": "Bundle、relations、Sync Plan、Diff、ownership", "accept": "任何写入前可看到完整计划"},
+          {"phase": "M5 Safe Apply", "scope": "Snapshot、staging、atomic replace、verify、rollback", "accept": "中断/漂移/误删场景不丢用户原文件"},
+          {"phase": "M6 Update + 第二 Agent", "scope": "Git Source、更新状态机、第二 Adapter 或 manual-export", "accept": "Upstream/Local/Target 三线变化能正确区分"}
         ]
       }
     }

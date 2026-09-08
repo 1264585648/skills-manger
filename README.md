@@ -66,6 +66,24 @@ M2 自动化测试覆盖：
 
 M2 CI 已通过 TypeScript strict typecheck、Vite production build、Rust tests、Windows Tauri installer build 与 artifact upload。
 
+### M3 — Claude Code Agent Discovery
+
+已实现只读发现链路：
+
+- 启动时登记 Claude Code target 和默认 `~/.claude/skills` User root；
+- 仅通过 PATH 元数据检测 Claude Code 可执行文件，不启动任何进程；
+- 支持用户显式添加项目 `.claude/skills` root，重复添加保持幂等；
+- SQLite schema v3 持久化 Agent target、发现 root 和 SkillInstance；
+- 扫描 root 的直接子目录并复用 M2 `SKILL.md` 校验和 SHA-256 hash；
+- 有效实例显示为 `Unmanaged`，成功重扫后消失的实例显示为 `Missing`；
+- 单个无效 Skill 只产生 warning，不阻断同目录其他 Skill；root 不可读时保留上一次实例状态；
+- 拒绝 root、Skill 目录、manifest 或内容树中的 symlink，不访问链接目标；
+- Agents、Settings 和 Skills 页面已接入真实 Tauri command，浏览器预览继续使用 mock；
+- 移除项目 root 只删除 SQLite 发现记录，不修改 Agent 目录；
+- M3 不包含 Adopt、部署、同步或 watcher，不写入 Agent 文件。
+
+本机前端测试与生产构建通过；本机缺少 Rust 工具链，因此 Rust 测试、桌面启动和真实 UI E2E 状态为 `BLOCKED`，不能据此宣称 M3 E2E PASS。
+
 ## 本地开发
 
 前置条件：
@@ -106,6 +124,8 @@ src/
 src-tauri/src/
 ├── commands.rs       # Tauri commands
 ├── db.rs             # SQLite schema / repository
+├── agent_discovery.rs # Claude Code roots / SkillInstance 扫描与协调
+├── claude_code.rs     # 无进程启动的 PATH / 默认 root 检测
 ├── skills.rs         # SKILL.md 解析、校验、Hash、Library 导入
 ├── error.rs
 ├── logging.rs
@@ -139,4 +159,4 @@ src-tauri/src/
 
 ## 下一步
 
-进入 **M3 — Agent Discovery + Adapter**：先实现 Claude Code Adapter，检测本机 Claude Code、识别 User / Project Skill roots，把 Agent 目录中的 Skill 作为 `SkillInstance` 发现出来并标记为 `Unmanaged`，但不自动纳入 Canonical Library。
+进入 **M4 — Bundle + Sync Planner**：为 Canonical Library 建立可持久化 Bundle / relation，并生成只读 Sync Plan。任何 Agent 写入仍需等待后续 Safe Apply 阶段，且必须先预览和确认。
