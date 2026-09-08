@@ -92,8 +92,9 @@ pub fn scan_claude_code(
     db: &Database,
     library_root: &Path,
 ) -> Result<AgentDiscoverySnapshot, AppError> {
-    let home = claude_code::current_home()
-        .ok_or_else(|| AppError::State("the current user home directory is unavailable".to_string()))?;
+    let home = claude_code::current_home().ok_or_else(|| {
+        AppError::State("the current user home directory is unavailable".to_string())
+    })?;
     let path_value = std::env::var_os("PATH").unwrap_or_default();
     scan_claude_code_with_environment(db, library_root, &home, &path_value, unix_timestamp()?)
 }
@@ -179,7 +180,8 @@ fn ensure_target_registration(db: &Database, timestamp: i64) -> Result<(), AppEr
 }
 
 fn detect_target(environment: Option<(&OsStr, i64)>) -> AgentTargetRecord {
-    let executable = environment.and_then(|(path_value, _)| claude_code::find_executable(path_value));
+    let executable =
+        environment.and_then(|(path_value, _)| claude_code::find_executable(path_value));
     let was_scanned = environment.is_some();
     let detected = executable.is_some();
     AgentTargetRecord {
@@ -264,7 +266,10 @@ pub(crate) fn scan_and_persist_root(
     let metadata = match fs::symlink_metadata(configured_path) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            let warning = format!("discovery root is not available: {}", configured_path.display());
+            let warning = format!(
+                "discovery root is not available: {}",
+                configured_path.display()
+            );
             persist_root_warning(db, root, None, &warning, timestamp)?;
             return Ok(vec![warning]);
         }
@@ -454,8 +459,8 @@ mod tests {
     use crate::db::Database;
 
     use super::{
-        ensure_target_registration, scan_and_persist_root, AgentTargetRecord,
-        DiscoveryRootRecord, SkillInstanceRecord,
+        ensure_target_registration, scan_and_persist_root, AgentTargetRecord, DiscoveryRootRecord,
+        SkillInstanceRecord,
     };
 
     fn test_root(label: &str) -> PathBuf {
@@ -562,7 +567,10 @@ mod tests {
     #[test]
     fn discovers_valid_skills_without_executing_scripts() {
         let test_directory = test_root("safe-scan");
-        let skills_root = test_directory.join("project").join(".claude").join("skills");
+        let skills_root = test_directory
+            .join("project")
+            .join(".claude")
+            .join("skills");
         let skill = skills_root.join("demo-skill");
         write_skill(&skill, "demo-skill", "Safe scanner fixture.");
         fs::create_dir_all(skill.join("scripts")).expect("scripts directory should exist");
@@ -594,7 +602,10 @@ mod tests {
     #[test]
     fn invalid_skill_does_not_hide_valid_sibling() {
         let test_directory = test_root("invalid-sibling");
-        let skills_root = test_directory.join("project").join(".claude").join("skills");
+        let skills_root = test_directory
+            .join("project")
+            .join(".claude")
+            .join("skills");
         write_skill(
             &skills_root.join("valid-skill"),
             "valid-skill",
@@ -656,10 +667,8 @@ mod tests {
             )
             .expect("second root should persist");
 
-        scan_and_persist_root(&database, &first, &library, 10)
-            .expect("first root should scan");
-        scan_and_persist_root(&database, &second, &library, 11)
-            .expect("second root should scan");
+        scan_and_persist_root(&database, &first, &library, 10).expect("first root should scan");
+        scan_and_persist_root(&database, &second, &library, 11).expect("second root should scan");
         let instances = database
             .list_skill_instances()
             .expect("instances should list");
@@ -675,17 +684,18 @@ mod tests {
     #[test]
     fn successful_rescan_marks_removed_instance_missing() {
         let test_directory = test_root("missing-instance");
-        let skills_root = test_directory.join("project").join(".claude").join("skills");
+        let skills_root = test_directory
+            .join("project")
+            .join(".claude")
+            .join("skills");
         let skill = skills_root.join("demo-skill");
         write_skill(&skill, "demo-skill", "Missing instance fixture.");
         let (database, root, library) =
             prepare_database(&test_directory, &skills_root, "root-missing", "project");
-        scan_and_persist_root(&database, &root, &library, 10)
-            .expect("initial scan should work");
+        scan_and_persist_root(&database, &root, &library, 10).expect("initial scan should work");
 
         fs::remove_dir_all(&skill).expect("fixture skill should be removed");
-        scan_and_persist_root(&database, &root, &library, 20)
-            .expect("rescan should work");
+        scan_and_persist_root(&database, &root, &library, 20).expect("rescan should work");
         let instances = database
             .list_skill_instances()
             .expect("instances should list");
@@ -701,7 +711,10 @@ mod tests {
     #[test]
     fn missing_root_preserves_existing_instances_and_returns_warning() {
         let test_directory = test_root("missing-root");
-        let skills_root = test_directory.join("project").join(".claude").join("skills");
+        let skills_root = test_directory
+            .join("project")
+            .join(".claude")
+            .join("skills");
         write_skill(
             &skills_root.join("demo-skill"),
             "demo-skill",
@@ -709,8 +722,7 @@ mod tests {
         );
         let (database, root, library) =
             prepare_database(&test_directory, &skills_root, "root-unavailable", "project");
-        scan_and_persist_root(&database, &root, &library, 10)
-            .expect("initial scan should work");
+        scan_and_persist_root(&database, &root, &library, 10).expect("initial scan should work");
         let before = instance_by_name(
             &database
                 .list_skill_instances()
@@ -763,7 +775,10 @@ mod tests {
     #[test]
     fn duplicate_project_root_returns_existing_record() {
         let test_directory = test_root("duplicate-project-root");
-        let skills_root = test_directory.join("project").join(".claude").join("skills");
+        let skills_root = test_directory
+            .join("project")
+            .join(".claude")
+            .join("skills");
         let library = test_directory.join("library");
         fs::create_dir_all(&skills_root).expect("project root should exist");
         fs::create_dir_all(&library).expect("library should exist");
@@ -807,7 +822,10 @@ mod tests {
     #[test]
     fn linked_skill_directory_is_not_followed() {
         let test_directory = test_root("linked-skill");
-        let skills_root = test_directory.join("project").join(".claude").join("skills");
+        let skills_root = test_directory
+            .join("project")
+            .join(".claude")
+            .join("skills");
         let external_skill = test_directory.join("outside").join("external-skill");
         let linked_skill = skills_root.join("external-skill");
         fs::create_dir_all(&skills_root).expect("skills root should exist");

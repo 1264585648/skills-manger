@@ -24,7 +24,9 @@ pub fn preview_skill_directory(
 ) -> Result<SkillImportPreview, AppError> {
     let canonical_source = source.as_ref().canonicalize()?;
     if !canonical_source.is_dir() {
-        return Err(AppError::InvalidSkill("selected path is not a directory".to_string()));
+        return Err(AppError::InvalidSkill(
+            "selected path is not a directory".to_string(),
+        ));
     }
 
     let canonical_library = library_root.canonicalize()?;

@@ -212,7 +212,9 @@ pub(crate) fn inspect_skill(root: &Path) -> Result<InspectedSkill, AppError> {
     let parent_name = root
         .file_name()
         .and_then(|value| value.to_str())
-        .ok_or_else(|| AppError::InvalidSkill("skill directory name is not valid UTF-8".to_string()))?;
+        .ok_or_else(|| {
+            AppError::InvalidSkill("skill directory name is not valid UTF-8".to_string())
+        })?;
     let contents = inspect_skill_contents(root, parent_name)?;
 
     let source_locator = root.to_string_lossy().into_owned();
@@ -418,7 +420,9 @@ fn collect_files(
         } else if file_type.is_file() {
             let relative = path
                 .strip_prefix(root)
-                .map_err(|_| AppError::State("failed to calculate relative skill path".to_string()))?
+                .map_err(|_| {
+                    AppError::State("failed to calculate relative skill path".to_string())
+                })?
                 .to_path_buf();
             output.push((relative, path));
         }
@@ -678,8 +682,7 @@ mod tests {
         let mutator = thread::spawn(move || {
             for _ in 0..10_000 {
                 if staged_manifest.is_file() {
-                    fs::write(source_target, "after\n")
-                        .expect("source mutation should succeed");
+                    fs::write(source_target, "after\n").expect("source mutation should succeed");
                     return;
                 }
                 thread::sleep(Duration::from_millis(1));

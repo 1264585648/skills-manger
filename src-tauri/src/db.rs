@@ -625,7 +625,9 @@ impl Database {
         transaction.commit()?;
 
         self.skill_by_identity(&draft.source_id, &draft.relative_path)?
-            .ok_or_else(|| AppError::State("skill upsert completed but record is missing".to_string()))
+            .ok_or_else(|| {
+                AppError::State("skill upsert completed but record is missing".to_string())
+            })
     }
 
     fn counter_in_transaction(transaction: &Transaction<'_>) -> Result<i64, AppError> {
@@ -714,7 +716,10 @@ impl Database {
         }
     }
 
-    fn bundle_items(connection: &Connection, bundle_id: &str) -> Result<Vec<BundleItemRecord>, AppError> {
+    fn bundle_items(
+        connection: &Connection,
+        bundle_id: &str,
+    ) -> Result<Vec<BundleItemRecord>, AppError> {
         let mut statement = connection.prepare(
             "SELECT skill_id, mode, position FROM bundle_items
              WHERE bundle_id = ?1 ORDER BY position ASC",
@@ -749,6 +754,55 @@ fn row_to_skill(row: &Row<'_>) -> rusqlite::Result<SkillRecord> {
     })
 }
 
+fn row_to_agent_target(row: &Row<'_>) -> rusqlite::Result<AgentTargetRecord> {
+    let capabilities_json: String = row.get(3)?;
+    let capabilities = serde_json::from_str(&capabilities_json).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(3, Type::Text, Box::new(error))
+    })?;
+
+    Ok(AgentTargetRecord {
+        id: row.get(0)?,
+        name: row.get(1)?,
+        provider: row.get(2)?,
+        capabilities,
+        detected: row.get(4)?,
+        executable_path: row.get(5)?,
+        version: row.get(6)?,
+        last_warning: row.get(7)?,
+        last_scanned_at: row.get(8)?,
+    })
+}
+
+fn row_to_discovery_root(row: &Row<'_>) -> rusqlite::Result<DiscoveryRootRecord> {
+    Ok(DiscoveryRootRecord {
+        id: row.get(0)?,
+        agent_id: row.get(1)?,
+        scope: row.get(2)?,
+        configured_path: row.get(3)?,
+        canonical_path: row.get(4)?,
+        enabled: row.get(5)?,
+        is_default: row.get(6)?,
+        last_warning: row.get(7)?,
+    })
+}
+
+fn row_to_skill_instance(row: &Row<'_>) -> rusqlite::Result<SkillInstanceRecord> {
+    Ok(SkillInstanceRecord {
+        id: row.get(0)?,
+        agent_id: row.get(1)?,
+        root_id: row.get(2)?,
+        scope: row.get(3)?,
+        path: row.get(4)?,
+        name: row.get(5)?,
+        description: row.get(6)?,
+        content_hash: row.get(7)?,
+        script_count: row.get(8)?,
+        state: row.get(9)?,
+        first_discovered_at: row.get(10)?,
+        last_discovered_at: row.get(11)?,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
@@ -756,9 +810,7 @@ mod tests {
         time::{SystemTime, UNIX_EPOCH},
     };
 
-    use crate::agent_discovery::{
-        AgentTargetRecord, DiscoveryRootRecord, SkillInstanceDraft,
-    };
+    use crate::agent_discovery::{AgentTargetRecord, DiscoveryRootRecord, SkillInstanceDraft};
     use crate::bundle_planner::{BundleDraft, BundleItemDraft};
     use crate::skills::SkillDraft;
 
@@ -770,10 +822,8 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("system clock should be after epoch")
             .as_nanos();
-        let test_dir = std::env::temp_dir().join(format!(
-            "skills-manger-m0-{}-{nonce}",
-            std::process::id()
-        ));
+        let test_dir =
+            std::env::temp_dir().join(format!("skills-manger-m0-{}-{nonce}", std::process::id()));
         fs::create_dir_all(&test_dir).expect("test directory should be created");
         let database_path = test_dir.join("m0.sqlite3");
 
@@ -964,53 +1014,4 @@ mod tests {
         drop(reopened);
         let _ = fs::remove_dir_all(test_dir);
     }
-}
-
-fn row_to_agent_target(row: &Row<'_>) -> rusqlite::Result<AgentTargetRecord> {
-    let capabilities_json: String = row.get(3)?;
-    let capabilities = serde_json::from_str(&capabilities_json).map_err(|error| {
-        rusqlite::Error::FromSqlConversionFailure(3, Type::Text, Box::new(error))
-    })?;
-
-    Ok(AgentTargetRecord {
-        id: row.get(0)?,
-        name: row.get(1)?,
-        provider: row.get(2)?,
-        capabilities,
-        detected: row.get(4)?,
-        executable_path: row.get(5)?,
-        version: row.get(6)?,
-        last_warning: row.get(7)?,
-        last_scanned_at: row.get(8)?,
-    })
-}
-
-fn row_to_discovery_root(row: &Row<'_>) -> rusqlite::Result<DiscoveryRootRecord> {
-    Ok(DiscoveryRootRecord {
-        id: row.get(0)?,
-        agent_id: row.get(1)?,
-        scope: row.get(2)?,
-        configured_path: row.get(3)?,
-        canonical_path: row.get(4)?,
-        enabled: row.get(5)?,
-        is_default: row.get(6)?,
-        last_warning: row.get(7)?,
-    })
-}
-
-fn row_to_skill_instance(row: &Row<'_>) -> rusqlite::Result<SkillInstanceRecord> {
-    Ok(SkillInstanceRecord {
-        id: row.get(0)?,
-        agent_id: row.get(1)?,
-        root_id: row.get(2)?,
-        scope: row.get(3)?,
-        path: row.get(4)?,
-        name: row.get(5)?,
-        description: row.get(6)?,
-        content_hash: row.get(7)?,
-        script_count: row.get(8)?,
-        state: row.get(9)?,
-        first_discovered_at: row.get(10)?,
-        last_discovered_at: row.get(11)?,
-    })
 }

@@ -50,15 +50,17 @@ mod tests {
 
     #[test]
     fn path_search_finds_platform_claude_executable() {
-        let test_directory = std::env::temp_dir().join(format!(
-            "skills-manger-claude-path-{}",
-            std::process::id()
-        ));
+        let test_directory =
+            std::env::temp_dir().join(format!("skills-manger-claude-path-{}", std::process::id()));
         let first = test_directory.join("first");
         let second = test_directory.join("second");
         fs::create_dir_all(&first).expect("first PATH directory should exist");
         fs::create_dir_all(&second).expect("second PATH directory should exist");
-        let executable = second.join(if cfg!(windows) { "claude.exe" } else { "claude" });
+        let executable = second.join(if cfg!(windows) {
+            "claude.exe"
+        } else {
+            "claude"
+        });
         fs::write(&executable, []).expect("executable fixture should write");
         let joined = std::env::join_paths([first, second]).expect("PATH should join");
 

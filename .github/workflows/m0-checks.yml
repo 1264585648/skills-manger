@@ -57,17 +57,8 @@ jobs:
       - name: Frontend typecheck
         run: npm run typecheck
 
-      - name: Generate Rust formatting patch
-        run: |
-          cargo fmt --manifest-path src-tauri/Cargo.toml
-          git diff --output=rustfmt.patch -- src-tauri
-
-      - name: Upload Rust formatting patch
-        uses: actions/upload-artifact@v4
-        with:
-          name: rustfmt-patch
-          path: rustfmt.patch
-          if-no-files-found: ignore
+      - name: Check Rust formatting
+        run: cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
 
       - name: Lint Rust
         run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features -- -D warnings

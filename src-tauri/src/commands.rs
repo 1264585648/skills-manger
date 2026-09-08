@@ -3,8 +3,7 @@ use tauri::State;
 
 use crate::{
     agent_discovery::{
-        self, AgentDiscoverySnapshot, AgentTargetRecord, DiscoveryRootRecord,
-        SkillInstanceRecord,
+        self, AgentDiscoverySnapshot, AgentTargetRecord, DiscoveryRootRecord, SkillInstanceRecord,
     },
     bundle_planner::{self, BundleDraft, BundleRecord, SyncPlanRecord},
     error::CommandError,
@@ -34,9 +33,11 @@ pub fn get_health(state: State<'_, AppState>) -> Result<HealthSnapshot, CommandE
     state.db.health_check().map_err(CommandError::from)?;
     let counter = state.db.counter().map_err(CommandError::from)?;
 
-    let _ = state
-        .log
-        .write("info", "health_check", "desktop bridge and SQLite are ready");
+    let _ = state.log.write(
+        "info",
+        "health_check",
+        "desktop bridge and SQLite are ready",
+    );
 
     Ok(HealthSnapshot {
         app_version: env!("CARGO_PKG_VERSION").to_string(),
@@ -154,10 +155,7 @@ pub fn add_discovery_root(
 }
 
 #[tauri::command]
-pub fn remove_discovery_root(
-    state: State<'_, AppState>,
-    id: String,
-) -> Result<(), CommandError> {
+pub fn remove_discovery_root(state: State<'_, AppState>, id: String) -> Result<(), CommandError> {
     let root = state
         .db
         .list_discovery_roots()
@@ -181,7 +179,10 @@ pub fn remove_discovery_root(
     let _ = state.log.write(
         "info",
         "discovery_root_removed",
-        &format!("discovery root registration removed: {}", root.configured_path),
+        &format!(
+            "discovery root registration removed: {}",
+            root.configured_path
+        ),
     );
     Ok(())
 }
@@ -213,7 +214,11 @@ pub fn upsert_bundle(
     let _ = state.log.write(
         "info",
         "bundle_saved",
-        &format!("bundle saved: {} ({} items)", bundle.name, bundle.items.len()),
+        &format!(
+            "bundle saved: {} ({} items)",
+            bundle.name,
+            bundle.items.len()
+        ),
     );
     Ok(bundle)
 }
@@ -221,7 +226,9 @@ pub fn upsert_bundle(
 #[tauri::command]
 pub fn delete_bundle(state: State<'_, AppState>, id: String) -> Result<(), CommandError> {
     state.db.delete_bundle(&id).map_err(CommandError::from)?;
-    let _ = state.log.write("info", "bundle_deleted", &format!("bundle deleted: {id}"));
+    let _ = state
+        .log
+        .write("info", "bundle_deleted", &format!("bundle deleted: {id}"));
     Ok(())
 }
 
@@ -236,7 +243,11 @@ pub fn generate_sync_plan(
     let _ = state.log.write(
         "info",
         "sync_plan_generated",
-        &format!("read-only plan {} generated with {} items", plan.id, plan.items.len()),
+        &format!(
+            "read-only plan {} generated with {} items",
+            plan.id,
+            plan.items.len()
+        ),
     );
     Ok(plan)
 }
