@@ -84,6 +84,22 @@ M2 CI 已通过 TypeScript strict typecheck、Vite production build、Rust tests
 
 本机前端测试与生产构建通过；本机缺少 Rust 工具链，因此 Rust 测试、桌面启动和真实 UI E2E 状态为 `BLOCKED`，不能据此宣称 M3 E2E PASS。
 
+### M4 — Bundle + Read-only Sync Planner
+
+已完成：
+
+- SQLite schema v4 持久化 Bundle 与有序 Bundle items；
+- Bundle 保存使用单事务全量替换，校验名称、模式、重复项及 Canonical Library 外键；
+- Bundles 页面在桌面运行时读取真实数据，可新建、编辑和删除组合定义；
+- Bundle 只能引用 Canonical Library Skill，不允许把 `Unmanaged` 实例直接当作受管资产；
+- Rust Planner 对所选 Claude Code root 生成稳定计划 ID 和 `add / unchanged / conflict`；
+- 目标不存在为 `add`，hash 相同为 `unchanged`，未受管内容 hash 不同一律为 `conflict`；
+- Planner 不生成 `remove`，不授予 ownership，不提供 Apply command；
+- Sync 页面显示真实 Bundle、root、hash、原因和 warning，只允许确认“已审阅”；
+- “执行 Agent 写入”保持禁用，明确留到 M5 Safe Apply。
+
+前端单元测试现为 7 项且生产构建通过。Rust 与桌面验证仍受本机工具链缺失阻断。
+
 ## 本地开发
 
 前置条件：
@@ -159,4 +175,4 @@ src-tauri/src/
 
 ## 下一步
 
-进入 **M4 — Bundle + Sync Planner**：为 Canonical Library 建立可持久化 Bundle / relation，并生成只读 Sync Plan。任何 Agent 写入仍需等待后续 Safe Apply 阶段，且必须先预览和确认。
+进入 **M5 — Safe Apply**：在显式确认的无冲突计划上加入 ownership、snapshot、staging、atomic replace、verify 与 rollback。该阶段涉及 Agent 文件写入，必须维持默认拒绝和可恢复边界。

@@ -224,3 +224,23 @@ M3 仅实现 Claude Code 的只读发现：PATH 检测、默认 User root、显�
 ## 待复验事项
 
 在具备 Rust stable 与 Windows Tauri 构建依赖的环境依次运行：`cargo fmt --check`、`cargo clippy --all-targets --all-features -- -D warnings`、`cargo test`、`npm run desktop:dev`。桌面 E2E 需覆盖添加临时 Project root、扫描、重启持久化、Missing、移除 root 后源文件仍存在及脚本 sentinel 不存在。
+
+---
+
+# Skills Manager M4 Bundle + Planner Verification
+
+测试日期：2026-09-08（Asia/Shanghai）
+
+结论：**M4 前端验证通过；Rust/桌面验证 BLOCKED，不宣称 M4 E2E PASS。**
+
+| 测试项 | 结果 | 备注 |
+|---|---|---|
+| Bundle frontend mapper | PASS | 保留 position 排序及 Skill id |
+| Plan frontend mapper | PASS | 保留 action、current/library hash 与 reason |
+| 全部前端测试 | PASS | 7 passed，0 failed |
+| TypeScript + Vite build | PASS | 37 modules transformed |
+| SQLite v4 Bundle 持久化测试 | BLOCKED | 测试已加入；本机无 `cargo` |
+| Planner add/unchanged/conflict 测试 | BLOCKED | 确定性 plan id 与三种分类测试已加入；本机无 `cargo` |
+| 桌面 Bundle CRUD / Plan UI | BLOCKED | `npm run desktop:dev` 依赖缺失的 `cargo` |
+
+M4 静态安全检查确认 Planner 模块没有生产文件写入、复制、重命名、删除或进程启动；测试代码仅在系统临时目录创建/清理 SQLite fixture。M4 没有 Apply Tauri command，UI 的 Agent 写入按钮保持 disabled。
