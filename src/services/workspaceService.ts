@@ -4,6 +4,7 @@ import { mockAgents, mockBundles, mockSkills, mockSources, mockSyncItems } from 
 import { formatTimestamp } from "./formatTimestamp";
 import { createSkillImportPlan } from "./importPlanService";
 import { mapAgentTarget, mergeLibraryAndInstances } from "./discoveryMappers.ts";
+import { mapBundleRecord } from "./bundlePlannerMappers.ts";
 import type { Agent, Bundle, Skill, SourceConfig, SyncItem } from "../types/domain";
 import type {
   AgentDiscoverySnapshot,
@@ -12,6 +13,7 @@ import type {
   SkillInstanceRecord,
 } from "../types/discovery";
 import type { SkillImportCandidate, SkillImportPlan } from "../types/import";
+import type { BundleDraft, BundleRecord, SyncPlanRecord } from "../types/bundlePlanner";
 
 type LibrarySkillRecord = {
   id: string;
@@ -173,7 +175,43 @@ export const workspaceService = {
     return path ? this.importSkillDirectory(path) : null;
   },
 
-  async getBundles(): Promise<Bundle[]> { return copy(mockBundles); },
+  async getBundles(): Promise<Bundle[]> {
+    if (!isTauriRuntime()) return copy(mockBundles);
+    const records = await invoke<BundleRecord[]>("list_bundles");
+    return records.map(mapBundleRecord);
+  },
+
+  async getBundleRecords(): Promise<BundleRecord[]> {
+    if (!isTauriRuntime()) return [];
+    return invoke<BundleRecord[]>("list_bundles");
+  },
+
+  async saveBundle(draft: BundleDraft): Promise<BundleRecord> {
+    ensureDesktop();
+    try {
+      return await invoke<BundleRecord>("upsert_bundle", { draft });
+    } catch (error) {
+      throw new Error(formatCommandError(error));
+    }
+  },
+
+  async deleteBundle(id: string): Promise<void> {
+    ensureDesktop();
+    try {
+      await invoke("delete_bundle", { id });
+    } catch (error) {
+      throw new Error(formatCommandError(error));
+    }
+  },
+
+  async generateSyncPlan(bundleId: string, rootId: string): Promise<SyncPlanRecord> {
+    ensureDesktop();
+    try {
+      return await invoke<SyncPlanRecord>("generate_sync_plan", { bundleId, rootId });
+    } catch (error) {
+      throw new Error(formatCommandError(error));
+    }
+  },
   async getAgents(): Promise<Agent[]> {
     if (!isTauriRuntime()) return copy(mockAgents);
     const [targets, roots, instances] = await Promise.all([
