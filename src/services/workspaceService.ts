@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import { mockAgents, mockBundles, mockSkills, mockSources, mockSyncItems } from "../data/mock";
+import { formatTimestamp } from "./formatTimestamp";
 import { createSkillImportPlan } from "./importPlanService";
 import type { Agent, Bundle, Skill, SourceConfig, SyncItem } from "../types/domain";
 import type { SkillImportCandidate, SkillImportPlan } from "../types/import";
@@ -42,15 +43,6 @@ const copy = <T,>(value: T): T => structuredClone(value);
 
 const isTauriRuntime = (): boolean =>
   typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
-
-const formatTimestamp = (timestamp: number): string => {
-  if (!timestamp) return "—";
-  return new Intl.DateTimeFormat("zh-CN", {
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-  }).format(new Date(timestamp * 1000));
-};
 
 const mapLibrarySkill = (record: LibrarySkillRecord): Skill => ({
   id: record.id,

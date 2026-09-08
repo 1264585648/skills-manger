@@ -19,14 +19,37 @@ struct SkillFrontmatter {
     compatibility: Option<String>,
     #[serde(default)]
     metadata: BTreeMap<String, String>,
-    allowed_tools: Option<String>,
+    allowed_tools: Option<AllowedTools>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum AllowedTools {
+    Text(String),
+    List(Vec<String>),
+}
+
+impl AllowedTools {
+    fn into_storage(self) -> String {
+        match self {
+            Self::Text(value) => value,
+            Self::List(values) => values.join(", "),
+        }
+    }
 }
 
 #[derive(Debug)]
-struct InspectedSkill {
-    source_path: PathBuf,
-    source_id: String,
-    skill_id: String,
+pub(crate) struct InspectedSkill {
+    pub(crate) source_path: PathBuf,
+    pub(crate) source_id: String,
+    pub(crate) skill_id: String,
+    pub(crate) name: String,
+    pub(crate) description: String,
+    pub(crate) content_hash: String,
+}
+
+#[derive(Debug)]
+struct SkillContents {
     name: String,
     description: String,
     version: Option<String>,
@@ -122,6 +145,13 @@ pub fn import_skill_directory(
     remove_if_exists(&staging)?;
     remove_if_exists(&backup)?;
     copy_tree(&inspected.source_path, &staging)?;
+    let staged_contents = match inspect_skill_contents(&staging, &inspected.name) {
+        Ok(contents) => contents,
+        Err(error) => {
+            let _ = remove_if_exists(&staging);
+            return Err(error);
+        }
+    };
 
     let had_existing = destination.exists();
     if had_existing {
@@ -142,16 +172,16 @@ pub fn import_skill_directory(
         source_kind: "local".to_string(),
         source_locator: inspected.source_path.to_string_lossy().into_owned(),
         relative_path: ".".to_string(),
-        name: inspected.name,
-        description: inspected.description,
-        version: inspected.version,
-        license: inspected.license,
-        compatibility: inspected.compatibility,
-        allowed_tools: inspected.allowed_tools,
-        metadata_json: inspected.metadata_json,
-        content_hash: inspected.content_hash,
+        name: staged_contents.name,
+        description: staged_contents.description,
+        version: staged_contents.version,
+        license: staged_contents.license,
+        compatibility: staged_contents.compatibility,
+        allowed_tools: staged_contents.allowed_tools,
+        metadata_json: staged_contents.metadata_json,
+        content_hash: staged_contents.content_hash,
         library_path: destination.to_string_lossy().into_owned(),
-        script_count: inspected.script_count,
+        script_count: staged_contents.script_count,
         timestamp,
     };
 
@@ -177,7 +207,28 @@ pub fn import_skill_directory(
     }
 }
 
-fn inspect_skill(root: &Path) -> Result<InspectedSkill, AppError> {
+pub(crate) fn inspect_skill(root: &Path) -> Result<InspectedSkill, AppError> {
+    let parent_name = root
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| AppError::InvalidSkill("skill directory name is not valid UTF-8".to_string()))?;
+    let contents = inspect_skill_contents(root, parent_name)?;
+
+    let source_locator = root.to_string_lossy().into_owned();
+    let source_id = hash_text(&format!("local\0{source_locator}"));
+    let skill_id = hash_text(&format!("{source_id}\0."));
+
+    Ok(InspectedSkill {
+        source_path: root.to_path_buf(),
+        source_id,
+        skill_id,
+        name: contents.name,
+        description: contents.description,
+        content_hash: contents.content_hash,
+    })
+}
+
+fn inspect_skill_contents(root: &Path, expected_name: &str) -> Result<SkillContents, AppError> {
     let manifest_path = root.join("SKILL.md");
     if !manifest_path.is_file() {
         return Err(AppError::InvalidSkill(
@@ -187,25 +238,19 @@ fn inspect_skill(root: &Path) -> Result<InspectedSkill, AppError> {
 
     let raw = fs::read_to_string(&manifest_path)?;
     let manifest = parse_manifest(&raw)?;
-    validate_manifest(root, &manifest)?;
+    validate_manifest(expected_name, &manifest)?;
 
-    let source_locator = root.to_string_lossy().into_owned();
-    let source_id = hash_text(&format!("local\0{source_locator}"));
-    let skill_id = hash_text(&format!("{source_id}\0."));
     let (content_hash, script_count) = hash_tree(root)?;
     let version = manifest.metadata.get("version").cloned();
     let metadata_json = serde_json::to_string(&manifest.metadata)?;
 
-    Ok(InspectedSkill {
-        source_path: root.to_path_buf(),
-        source_id,
-        skill_id,
+    Ok(SkillContents {
         name: manifest.name,
         description: manifest.description,
         version,
         license: manifest.license,
         compatibility: manifest.compatibility,
-        allowed_tools: manifest.allowed_tools,
+        allowed_tools: manifest.allowed_tools.map(AllowedTools::into_storage),
         metadata_json,
         content_hash,
         script_count,
@@ -241,7 +286,7 @@ fn parse_manifest(raw: &str) -> Result<SkillFrontmatter, AppError> {
     serde_yaml::from_str::<SkillFrontmatter>(&yaml.join("\n")).map_err(AppError::from)
 }
 
-fn validate_manifest(root: &Path, manifest: &SkillFrontmatter) -> Result<(), AppError> {
+fn validate_manifest(expected_name: &str, manifest: &SkillFrontmatter) -> Result<(), AppError> {
     let name = manifest.name.as_str();
     let valid_name = !name.is_empty()
         && name.chars().count() <= 64
@@ -258,15 +303,10 @@ fn validate_manifest(root: &Path, manifest: &SkillFrontmatter) -> Result<(), App
         ));
     }
 
-    let parent_name = root
-        .file_name()
-        .and_then(|value| value.to_str())
-        .ok_or_else(|| AppError::InvalidSkill("skill directory name is not valid UTF-8".to_string()))?;
-
-    if parent_name != manifest.name {
+    if expected_name != manifest.name {
         return Err(AppError::InvalidSkill(format!(
             "SKILL.md name '{}' must match parent directory '{}'",
-            manifest.name, parent_name
+            manifest.name, expected_name
         )));
     }
 
@@ -434,11 +474,16 @@ fn to_hex(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, path::Path, time::{SystemTime, UNIX_EPOCH}};
+    use std::{
+        fs,
+        path::{Path, PathBuf},
+        thread,
+        time::{Duration, SystemTime, UNIX_EPOCH},
+    };
 
     use crate::db::Database;
 
-    use super::import_skill_directory;
+    use super::{hash_text, hash_tree, import_skill_directory};
 
     fn test_root(label: &str) -> std::path::PathBuf {
         let nonce = SystemTime::now()
@@ -530,6 +575,107 @@ mod tests {
         let db = Database::initialize(root.join("skills.sqlite3")).expect("db should initialize");
         let error = import_skill_directory(&db, &library, &source).expect_err("import should fail");
         assert!(error.to_string().contains("must match parent directory"));
+
+        drop(db);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn allowed_tools_sequence_is_imported() {
+        let root = test_root("allowed-tools-sequence");
+        let source = root.join("source").join("demo-skill");
+        let library = root.join("library");
+        fs::create_dir_all(&source).expect("source should exist");
+        fs::create_dir_all(&library).expect("library should exist");
+        fs::write(
+            source.join("SKILL.md"),
+            "---\nname: demo-skill\ndescription: Sequence tools fixture.\nallowed-tools:\n  - read\n  - write\n---\n",
+        )
+        .expect("manifest should write");
+
+        let db = Database::initialize(root.join("skills.sqlite3")).expect("db should initialize");
+        let imported =
+            import_skill_directory(&db, &library, &source).expect("sequence should import");
+
+        assert_eq!(imported.outcome, "created");
+        assert_eq!(imported.skill.allowed_tools.as_deref(), Some("read, write"));
+
+        drop(db);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn allowed_tools_scalar_is_imported() {
+        let root = test_root("allowed-tools-scalar");
+        let source = root.join("source").join("demo-skill");
+        let library = root.join("library");
+        fs::create_dir_all(&source).expect("source should exist");
+        fs::create_dir_all(&library).expect("library should exist");
+        fs::write(
+            source.join("SKILL.md"),
+            "---\nname: demo-skill\ndescription: Scalar tools fixture.\nallowed-tools: read\n---\n",
+        )
+        .expect("manifest should write");
+
+        let db = Database::initialize(root.join("skills.sqlite3")).expect("db should initialize");
+        let imported =
+            import_skill_directory(&db, &library, &source).expect("scalar should import");
+
+        assert_eq!(imported.outcome, "created");
+        assert_eq!(imported.skill.allowed_tools.as_deref(), Some("read"));
+
+        drop(db);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn persisted_hash_is_derived_from_staged_copy() {
+        let root = test_root("staged-hash");
+        let source = root.join("source").join("demo-skill");
+        let library = root.join("library");
+        fs::create_dir_all(&source).expect("source should exist");
+        fs::create_dir_all(&library).expect("library should exist");
+        fs::write(
+            source.join("SKILL.md"),
+            "---\nname: demo-skill\ndescription: Staged hash fixture.\n---\n",
+        )
+        .expect("manifest should write");
+
+        let payload = vec![0_u8; 4 * 1024 * 1024];
+        for index in 0..20 {
+            fs::write(source.join(format!("bulk-{index:02}.bin")), &payload)
+                .expect("bulk fixture should write");
+        }
+        let source_target = source.join("z-target.txt");
+        fs::write(&source_target, "before\n").expect("target should write");
+
+        let canonical_source = source.canonicalize().expect("source should canonicalize");
+        let source_locator = canonical_source.to_string_lossy().into_owned();
+        let source_id = hash_text(&format!("local\0{source_locator}"));
+        let skill_id = hash_text(&format!("{source_id}\0."));
+        let staged_manifest = library
+            .join(format!(".staging-{skill_id}"))
+            .join("SKILL.md");
+
+        let mutator = thread::spawn(move || {
+            for _ in 0..10_000 {
+                if staged_manifest.is_file() {
+                    fs::write(source_target, "after\n")
+                        .expect("source mutation should succeed");
+                    return;
+                }
+                thread::sleep(Duration::from_millis(1));
+            }
+            panic!("staging copy was not observed");
+        });
+
+        let db = Database::initialize(root.join("skills.sqlite3")).expect("db should initialize");
+        let imported = import_skill_directory(&db, &library, &source).expect("import should work");
+        mutator.join().expect("mutator should finish");
+
+        let managed_path = PathBuf::from(&imported.skill.library_path);
+        let (managed_hash, _) = hash_tree(&managed_path).expect("managed copy should hash");
+        assert_eq!(imported.skill.content_hash, managed_hash);
 
         drop(db);
         let _ = fs::remove_dir_all(root);
