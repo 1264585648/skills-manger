@@ -243,4 +243,6 @@ M3 仅实现 Claude Code 的只读发现：PATH 检测、默认 User root、显�
 | Planner add/unchanged/conflict 测试 | BLOCKED | 确定性 plan id 与三种分类测试已加入；本机无 `cargo` |
 | 桌面 Bundle CRUD / Plan UI | BLOCKED | `npm run desktop:dev` 依赖缺失的 `cargo` |
 
+浏览器 UI 冒烟通过：Playwright 打开 Vite 页面，进入“工作流”后 Bundle 列表、详情和新建编辑器均可访问；进入“环境更新”后在缺少桌面发现 root 时正确显示空状态，生成与确认按钮禁用。控制台仅有缺失 `favicon.ico` 的 404，与业务无关。该检查使用 mock/空 fallback，不替代 Tauri command E2E。
+
 M4 静态安全检查确认 Planner 模块没有生产文件写入、复制、重命名、删除或进程启动；测试代码仅在系统临时目录创建/清理 SQLite fixture。M4 没有 Apply Tauri command，UI 的 Agent 写入按钮保持 disabled。
