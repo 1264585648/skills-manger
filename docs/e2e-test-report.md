@@ -180,7 +180,7 @@ allowed-tools:
 
 分支：`codex/m3-agent-discovery`
 
-结论：**实现与前端验证完成；Rust 编译、桌面启动和真实 UI E2E 因本机缺少 Rust 工具链而 BLOCKED。未输出 M3 E2E PASS。**
+结论：**实现、前端验证、CI Rust tests 与 Windows 安装包构建通过；本机真实 UI E2E 因缺少 Rust 工具链仍为 BLOCKED。未输出 M3 E2E PASS。**
 
 ## M3 范围
 
@@ -196,6 +196,8 @@ M3 仅实现 Claude Code 的只读发现：PATH 检测、默认 User root、显�
 | `cargo test` | BLOCKED | `cargo` 不在 PATH，按项目验收约束未安装或修改环境 |
 | `cargo fmt --check` / `cargo clippy` | BLOCKED | 同上 |
 | `npm run desktop:dev` | BLOCKED | `cargo metadata --no-deps --format-version 1: program not found` |
+| GitHub Actions Rust tests | PASS | Run `34243701885`：23 passed，0 failed |
+| GitHub Actions Windows installer | PASS | debug MSI/NSIS 均构建并上传，artifact SHA-256 `260a8d800d1d5dcb7cd4c7651b64513bf12a127f21fa04b54500b3f8fa0c8db7` |
 
 ## M3 测试矩阵
 
@@ -231,7 +233,7 @@ M3 仅实现 Claude Code 的只读发现：PATH 检测、默认 User root、显�
 
 测试日期：2026-09-08（Asia/Shanghai）
 
-结论：**M4 前端验证通过；Rust/桌面验证 BLOCKED，不宣称 M4 E2E PASS。**
+结论：**M4 前端与 CI Rust/Windows 构建通过；本机桌面 E2E BLOCKED，不宣称 M4 E2E PASS。**
 
 | 测试项 | 结果 | 备注 |
 |---|---|---|
@@ -239,8 +241,8 @@ M3 仅实现 Claude Code 的只读发现：PATH 检测、默认 User root、显�
 | Plan frontend mapper | PASS | 保留 action、current/library hash 与 reason |
 | 全部前端测试 | PASS | 7 passed，0 failed |
 | TypeScript + Vite build | PASS | 37 modules transformed |
-| SQLite v4 Bundle 持久化测试 | BLOCKED | 测试已加入；本机无 `cargo` |
-| Planner add/unchanged/conflict 测试 | BLOCKED | 确定性 plan id 与三种分类测试已加入；本机无 `cargo` |
+| SQLite v4 Bundle 持久化测试 | PASS | GitHub Actions Run `34243701885`，包含在 23 个 Rust tests 中 |
+| Planner add/unchanged/conflict 测试 | PASS | 同一 CI run；确定性 plan id 与三种分类通过 |
 | 桌面 Bundle CRUD / Plan UI | BLOCKED | `npm run desktop:dev` 依赖缺失的 `cargo` |
 
 浏览器 UI 冒烟通过：Playwright 打开 Vite 页面，进入“工作流”后 Bundle 列表、详情和新建编辑器均可访问；进入“环境更新”后在缺少桌面发现 root 时正确显示空状态，生成与确认按钮禁用。控制台仅有缺失 `favicon.ico` 的 404，与业务无关。该检查使用 mock/空 fallback，不替代 Tauri command E2E。
