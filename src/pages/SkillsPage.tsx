@@ -110,8 +110,10 @@ export function SkillsPage() {
   }, [group, query, skills]);
 
   const selected = skills.find((skill) => skill.id === selectedId) ?? filtered[0];
-  const cleanCount = skills.filter((skill) => skill.status === "clean").length;
+  const libraryCount = skills.filter((skill) => !skill.id.startsWith("instance:")).length;
+  const unmanagedCount = skills.filter((skill) => skill.status === "unmanaged").length;
   const attentionCount = skills.filter((skill) => skill.status !== "clean").length;
+  const selectedIsDiscovery = selected?.status === "unmanaged" || selected?.status === "missing";
 
   return <section className="page">
     <PageHeader
@@ -133,8 +135,8 @@ export function SkillsPage() {
     ) : null}
 
     <div className="summary-row summary-three">
-      <article><span>Library Skills</span><strong>{skills.length}</strong></article>
-      <article><span>状态正常</span><strong>{cleanCount}</strong></article>
+      <article><span>Library Skills</span><strong>{libraryCount}</strong></article>
+      <article><span>只读发现</span><strong>{unmanagedCount}</strong></article>
       <article><span>需要关注</span><strong>{attentionCount}</strong></article>
     </div>
 
@@ -173,10 +175,10 @@ export function SkillsPage() {
             <EmptyState title="正在读取 Library" body="从本地 SQLite 加载已托管 Skill。" />
           ) : filtered.length === 0 ? (
             <EmptyState
-              title={skills.length === 0 ? "Library 还是空的" : "没有匹配的 Skill"}
+              title={skills.length === 0 ? "还没有 Skill" : "没有匹配的 Skill"}
               body={
                 skills.length === 0
-                  ? "点击右上角“导入 Skill”，选择一个包含 SKILL.md 的目录。"
+                  ? "导入到 Library，或在 Settings 中添加 Claude Code 发现目录。"
                   : "调整搜索词或分组后再试。"
               }
             />
@@ -209,7 +211,7 @@ export function SkillsPage() {
             <div><h2>{selected.name}</h2><p>{selected.description}</p></div>
           </div>
           <div className="inspector-section">
-            <span className="section-label">Library</span>
+            <span className="section-label">{selectedIsDiscovery ? "Discovery" : "Library"}</span>
             <dl className="detail-list">
               <div><dt>来源</dt><dd title={selected.sourcePath}>{selected.source}</dd></div>
               <div><dt>版本</dt><dd>{selected.version}</dd></div>
@@ -219,6 +221,7 @@ export function SkillsPage() {
               <div><dt>更新</dt><dd>{selected.lastUpdated}</dd></div>
             </dl>
           </div>
+          {selectedIsDiscovery ? <p className="readonly-discovery-note">只读发现，尚未纳入 Library；不会写入或执行 Agent 目录内容。</p> : null}
           <div className="inspector-actions">
             <Button variant="primary" disabled>部署到 Agent</Button>
             <Button onClick={() => void loadSkills()}>重新读取</Button>

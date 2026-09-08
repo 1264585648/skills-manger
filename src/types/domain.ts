@@ -60,6 +60,8 @@ export interface Agent {
   scopes: string[];
   capabilities: string[];
   discoveredSkills: number;
+  warning?: string;
+  lastScannedAt?: number;
 }
 
 export type SyncAction = "add" | "update" | "unchanged" | "conflict";

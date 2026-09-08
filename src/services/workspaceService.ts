@@ -3,7 +3,14 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { mockAgents, mockBundles, mockSkills, mockSources, mockSyncItems } from "../data/mock";
 import { formatTimestamp } from "./formatTimestamp";
 import { createSkillImportPlan } from "./importPlanService";
+import { mapAgentTarget, mergeLibraryAndInstances } from "./discoveryMappers.ts";
 import type { Agent, Bundle, Skill, SourceConfig, SyncItem } from "../types/domain";
+import type {
+  AgentDiscoverySnapshot,
+  AgentTargetRecord,
+  DiscoveryRootRecord,
+  SkillInstanceRecord,
+} from "../types/discovery";
 import type { SkillImportCandidate, SkillImportPlan } from "../types/import";
 
 type LibrarySkillRecord = {
@@ -85,8 +92,11 @@ const ensureDesktop = (): void => {
 export const workspaceService = {
   async getSkills(): Promise<Skill[]> {
     if (!isTauriRuntime()) return copy(mockSkills);
-    const records = await invoke<LibrarySkillRecord[]>("list_library_skills");
-    return records.map(mapLibrarySkill);
+    const [records, instances] = await Promise.all([
+      invoke<LibrarySkillRecord[]>("list_library_skills"),
+      invoke<SkillInstanceRecord[]>("list_skill_instances"),
+    ]);
+    return mergeLibraryAndInstances(records.map(mapLibrarySkill), instances);
   },
 
   async pickSkillDirectory(): Promise<string | null> {
@@ -164,7 +174,61 @@ export const workspaceService = {
   },
 
   async getBundles(): Promise<Bundle[]> { return copy(mockBundles); },
-  async getAgents(): Promise<Agent[]> { return copy(mockAgents); },
+  async getAgents(): Promise<Agent[]> {
+    if (!isTauriRuntime()) return copy(mockAgents);
+    const [targets, roots, instances] = await Promise.all([
+      invoke<AgentTargetRecord[]>("list_agent_targets"),
+      invoke<DiscoveryRootRecord[]>("list_discovery_roots"),
+      invoke<SkillInstanceRecord[]>("list_skill_instances"),
+    ]);
+    return targets.map((target) => mapAgentTarget(target, instances, roots));
+  },
+
+  async scanClaudeCode(): Promise<AgentDiscoverySnapshot> {
+    ensureDesktop();
+    try {
+      return await invoke<AgentDiscoverySnapshot>("scan_claude_code");
+    } catch (error) {
+      throw new Error(formatCommandError(error));
+    }
+  },
+
+  async getDiscoveryRoots(): Promise<DiscoveryRootRecord[]> {
+    if (!isTauriRuntime()) return [];
+    return invoke<DiscoveryRootRecord[]>("list_discovery_roots");
+  },
+
+  async pickDiscoveryRoot(): Promise<string | null> {
+    ensureDesktop();
+    const selection = await open({
+      directory: true,
+      multiple: false,
+      title: "选择项目的 .claude/skills 目录",
+    });
+    if (!selection) return null;
+    return Array.isArray(selection) ? selection[0] ?? null : selection;
+  },
+
+  async addDiscoveryRoot(path: string): Promise<DiscoveryRootRecord> {
+    ensureDesktop();
+    try {
+      return await invoke<DiscoveryRootRecord>("add_discovery_root", {
+        path,
+        scope: "project",
+      });
+    } catch (error) {
+      throw new Error(formatCommandError(error));
+    }
+  },
+
+  async removeDiscoveryRoot(id: string): Promise<void> {
+    ensureDesktop();
+    try {
+      await invoke("remove_discovery_root", { id });
+    } catch (error) {
+      throw new Error(formatCommandError(error));
+    }
+  },
   async getSyncItems(): Promise<SyncItem[]> { return copy(mockSyncItems); },
   async getSources(): Promise<SourceConfig[]> { return copy(mockSources); },
 };
