@@ -82,7 +82,7 @@ M2 CI 已通过 TypeScript strict typecheck、Vite production build、Rust tests
 - 移除项目 root 只删除 SQLite 发现记录，不修改 Agent 目录；
 - M3 不包含 Adopt、部署、同步或 watcher，不写入 Agent 文件。
 
-本机前端测试与生产构建通过；本机缺少 Rust 工具链，因此 Rust 测试、桌面启动和真实 UI E2E 状态为 `BLOCKED`，不能据此宣称 M3 E2E PASS。
+前端测试、Rust 自动化和 Windows 构建已通过。桌面操作的验证范围与结果见 `docs/e2e-test-report.md`。
 
 ### M4 — Bundle + Read-only Sync Planner
 
@@ -98,7 +98,28 @@ M2 CI 已通过 TypeScript strict typecheck、Vite production build、Rust tests
 - Sync 页面显示真实 Bundle、root、hash、原因和 warning，只允许确认“已审阅”；
 - “执行 Agent 写入”保持禁用，明确留到 M5 Safe Apply。
 
-前端单元测试现为 7 项且生产构建通过。Rust 与桌面验证仍受本机工具链缺失阻断。
+前端单元测试现为 7 项且生产构建通过。Rust 与桌面验证已在 Windows MSVC 工具链下完成。
+
+### M5 — Safe Apply ✅
+
+已把只读 Sync Plan 接入受控写入流程：
+
+- SQLite schema v5 持久化不可变计划、Deployment、Apply Operation 和操作明细；
+- Apply 前重新校验计划、Library hash、Agent root 和 ownership；
+- 对新增和更新 Skill 使用 staging、snapshot 和同盘 atomic replace；
+- 写入后重新扫描并校验 content hash；
+- 任一项失败时按逆序回滚已完成项，并记录回滚结果；
+- unmanaged 内容、目标漂移、过期计划和路径越界均默认拒绝；
+- 同步和验证阶段绝不执行 Skill 内 scripts。
+
+### M6 — Git Source + Codex Adapter ✅
+
+- 支持 HTTPS Git Source 的 clone、fetch、更新检查和显式 promote；
+- 以 upstream、Canonical Library、owned target 三条线区分 clean、upstream update、local modified、target drift、conflict 和 missing；
+- Git 命令禁用 hooks，不保存 URL 内嵌凭据；
+- 新增 Codex Agent Adapter，支持 PATH 检测、`~/.codex/skills`、`~/.agents/skills` 和显式项目 root；
+- Claude Code 与 Codex 共用 discovery、Bundle Planner 和 Safe Apply 内核；
+- Git checkout、Agent root 和 Library 路径均拒绝 symlink，并限制在明确配置的目录内。
 
 ## 本地开发
 
@@ -140,8 +161,12 @@ src/
 src-tauri/src/
 ├── commands.rs       # Tauri commands
 ├── db.rs             # SQLite schema / repository
-├── agent_discovery.rs # Claude Code roots / SkillInstance 扫描与协调
+├── agent_discovery.rs # Agent roots / SkillInstance 扫描与协调
 ├── claude_code.rs     # 无进程启动的 PATH / 默认 root 检测
+├── codex.rs            # Codex PATH / 默认 root 检测
+├── bundle_planner.rs   # Bundle 与 Sync Plan
+├── safe_apply.rs       # Snapshot / Apply / Verify / Rollback
+├── git_sources.rs      # Git Source 更新与 promote
 ├── skills.rs         # SKILL.md 解析、校验、Hash、Library 导入
 ├── error.rs
 ├── logging.rs
@@ -154,8 +179,8 @@ src-tauri/src/
 
 `.github/workflows/m0-checks.yml` 当前作为桌面基础质量门禁：
 
-- Ubuntu：TypeScript typecheck + Vite build；
-- Windows：Frontend typecheck + Rust tests + Tauri debug installer build；
+- Ubuntu：Frontend tests、TypeScript typecheck + Vite build；
+- Windows：Frontend typecheck、Rust fmt/clippy/tests + Tauri debug installer build；
 - Windows installer bundle 作为 Actions artifact 上传。
 
 ## 技术方案与 UI
@@ -173,6 +198,6 @@ src-tauri/src/
 5. **不同 Agent 通过 Capability 声明能力，不假设都是本地目录复制。**
 6. **扫描与同步阶段绝不执行第三方 Skill 内 scripts。**
 
-## 下一步
+## 当前状态
 
-进入 **M5 — Safe Apply**：在显式确认的无冲突计划上加入 ownership、snapshot、staging、atomic replace、verify 与 rollback。该阶段涉及 Agent 文件写入，必须维持默认拒绝和可恢复边界。
+V1 的 M0-M6 功能代码已合入 `main`。后续工作聚焦于持续集成回归、桌面 E2E 证据和发布流程维护；任何 Agent 文件写入仍必须经过显式 Sync Plan、ownership 校验和可恢复操作。

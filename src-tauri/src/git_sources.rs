@@ -455,7 +455,11 @@ fn validate_reference(value: &str) -> Result<String, AppError> {
 
 fn validate_subpath(value: &str) -> Result<PathBuf, AppError> {
     let trimmed = value.trim();
-    let path = if trimmed.is_empty() { Path::new(".") } else { Path::new(trimmed) };
+    let path = if trimmed.is_empty() {
+        Path::new(".")
+    } else {
+        Path::new(trimmed)
+    };
     if path.is_absolute()
         || path.components().any(|component| {
             !matches!(component, Component::Normal(_) | Component::CurDir)
@@ -481,6 +485,8 @@ fn prepare_checkout_root(path: &Path) -> Result<PathBuf, AppError> {
 }
 
 fn clone_source(url: &str, reference: &str, checkout: &Path) -> Result<(), AppError> {
+    // Git for Windows requires a DOS-compatible path instead of Rust's verbatim prefix.
+    let checkout = dunce::simplified(checkout);
     let args = vec![
         OsString::from("clone"),
         OsString::from("--no-checkout"),
@@ -497,10 +503,7 @@ fn clone_source(url: &str, reference: &str, checkout: &Path) -> Result<(), AppEr
 }
 
 fn fetch_source(checkout: &Path, reference: &str) -> Result<(), AppError> {
-    run_git(
-        Some(checkout),
-        ["fetch", "--force", "origin", reference],
-    )?;
+    run_git(Some(checkout), ["fetch", "--force", "origin", reference])?;
     run_git(Some(checkout), ["checkout", "--detach", "FETCH_HEAD"])?;
     Ok(())
 }
@@ -535,7 +538,7 @@ where
 {
     let mut command = Command::new("git");
     if let Some(checkout) = checkout {
-        command.arg("-C").arg(checkout);
+        command.arg("-C").arg(dunce::simplified(checkout));
     }
     command
         .arg("-c")
@@ -546,7 +549,11 @@ where
 }
 
 fn null_device() -> &'static str {
-    if cfg!(windows) { "NUL" } else { "/dev/null" }
+    if cfg!(windows) {
+        "NUL"
+    } else {
+        "/dev/null"
+    }
 }
 
 fn git_failure(stderr: &[u8]) -> AppError {
@@ -572,8 +579,8 @@ mod tests {
     use crate::{db::Database, skills};
 
     use super::{
-        check_git_source, list_update_statuses, promote_git_source,
-        register_git_source_inner, GitSourceDraft,
+        check_git_source, list_update_statuses, promote_git_source, register_git_source_inner,
+        GitSourceDraft,
     };
 
     fn git(directory: &Path, args: &[&str]) {
@@ -635,8 +642,8 @@ mod tests {
         assert_eq!(initial.status, "clean");
 
         commit_skill(&repository, "version two");
-        let update = check_git_source(&database, &initial.source_id, 20)
-            .expect("source should refresh");
+        let update =
+            check_git_source(&database, &initial.source_id, 20).expect("source should refresh");
         assert_eq!(update.status, "upstream_update");
         assert!(update.can_promote);
         let promoted = promote_git_source(&database, &library, &initial.source_id, 30)
@@ -657,8 +664,8 @@ mod tests {
             "local_modified"
         );
         commit_skill(&repository, "version three");
-        let conflict = check_git_source(&database, &initial.source_id, 40)
-            .expect("source should refresh");
+        let conflict =
+            check_git_source(&database, &initial.source_id, 40).expect("source should refresh");
         assert_eq!(conflict.status, "conflict");
         assert!(!conflict.can_promote);
         assert!(promote_git_source(&database, &library, &initial.source_id, 50).is_err());

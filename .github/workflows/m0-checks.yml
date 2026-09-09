@@ -25,6 +25,9 @@ jobs:
       - name: Install dependencies
         run: npm install
 
+      - name: Frontend unit tests
+        run: npm run test:frontend
+
       - name: Typecheck
         run: npm run typecheck
 
@@ -58,18 +61,7 @@ jobs:
         run: npm run typecheck
 
       - name: Check Rust formatting
-        run: cargo fmt --manifest-path src-tauri/Cargo.toml
-
-      - name: Export Rust formatting patch
-        shell: bash
-        run: git diff --binary -- src-tauri > rustfmt.patch
-
-      - name: Upload Rust formatting patch
-        uses: actions/upload-artifact@v4
-        with:
-          name: m6-rustfmt-patch
-          path: rustfmt.patch
-          if-no-files-found: error
+        run: cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
 
       - name: Lint Rust
         run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features -- -D warnings

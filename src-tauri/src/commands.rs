@@ -124,11 +124,9 @@ pub fn scan_claude_code(
 }
 
 #[tauri::command]
-pub fn scan_codex(
-    state: State<'_, AppState>,
-) -> Result<AgentDiscoverySnapshot, CommandError> {
-    let snapshot = agent_discovery::scan_codex(&state.db, &state.library_root)
-        .map_err(CommandError::from)?;
+pub fn scan_codex(state: State<'_, AppState>) -> Result<AgentDiscoverySnapshot, CommandError> {
+    let snapshot =
+        agent_discovery::scan_codex(&state.db, &state.library_root).map_err(CommandError::from)?;
     let _ = state.log.write(
         "info",
         "codex_scanned",

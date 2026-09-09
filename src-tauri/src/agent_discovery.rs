@@ -110,10 +110,7 @@ pub fn scan_claude_code(
     scan_claude_code_with_environment(db, library_root, &home, &path_value, unix_timestamp()?)
 }
 
-pub fn scan_codex(
-    db: &Database,
-    library_root: &Path,
-) -> Result<AgentDiscoverySnapshot, AppError> {
+pub fn scan_codex(db: &Database, library_root: &Path) -> Result<AgentDiscoverySnapshot, AppError> {
     let home = claude_code::current_home().ok_or_else(|| {
         AppError::State("the current user home directory is unavailable".to_string())
     })?;
@@ -320,11 +317,7 @@ fn detect_codex_target(environment: Option<(&OsStr, i64)>) -> AgentTargetRecord 
     }
 }
 
-fn ensure_codex_default_roots(
-    db: &Database,
-    home: &Path,
-    timestamp: i64,
-) -> Result<(), AppError> {
+fn ensure_codex_default_roots(db: &Database, home: &Path, timestamp: i64) -> Result<(), AppError> {
     for path in codex::default_user_skills_roots(home)
         .into_iter()
         .filter(|path| path.is_dir())
@@ -994,7 +987,10 @@ mod tests {
     #[test]
     fn codex_project_root_accepts_only_bounded_skill_conventions() {
         let test_directory = test_root("codex-project-root");
-        let valid_root = test_directory.join("project").join(".agents").join("skills");
+        let valid_root = test_directory
+            .join("project")
+            .join(".agents")
+            .join("skills");
         let invalid_root = test_directory.join("project").join("skills");
         let library = test_directory.join("library");
         fs::create_dir_all(&valid_root).expect("valid root should exist");
@@ -1003,23 +999,13 @@ mod tests {
         let database = Database::initialize(test_directory.join("skills.sqlite3"))
             .expect("database should initialize");
 
-        let record = super::register_project_root_for_agent(
-            &database,
-            &library,
-            "codex",
-            &valid_root,
-            10,
-        )
-        .expect("Codex root should register");
+        let record =
+            super::register_project_root_for_agent(&database, &library, "codex", &valid_root, 10)
+                .expect("Codex root should register");
         assert_eq!(record.agent_id, "codex");
-        let error = super::register_project_root_for_agent(
-            &database,
-            &library,
-            "codex",
-            &invalid_root,
-            20,
-        )
-        .expect_err("unbounded root should fail");
+        let error =
+            super::register_project_root_for_agent(&database, &library, "codex", &invalid_root, 20)
+                .expect_err("unbounded root should fail");
         assert!(error.to_string().contains(".agents/skills"));
 
         drop(database);

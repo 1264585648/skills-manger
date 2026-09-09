@@ -259,4 +259,24 @@ Draft PR [#3](https://github.com/1264585648/skills-manger/pull/3) 的 Run `34246
 - TypeScript typecheck 与 Vite production build；
 - Windows debug MSI/NSIS 构建及 artifact upload。
 
-因此 M3/M4 的 Rust 编译、格式、lint 和自动化回归已有远端权威证据；本机 `desktop:dev` 与真实窗口操作仍因本机无 Rust 工具链而保留为 BLOCKED。
+因此 M3/M4 的 Rust 编译、格式、lint 和自动化回归已有远端权威证据；该阶段本机 `desktop:dev` 与真实窗口操作因当时缺少 Rust 工具链而记录为 BLOCKED。
+
+---
+
+# 合入 M6 后本地验证
+
+测试日期：2026-09-09（Asia/Shanghai）
+
+| 命令/检查 | 结果 | 备注 |
+|---|---|---|
+| `npm run test:frontend` | PASS | 7 passed，0 failed |
+| `npm run typecheck` / `npm run build` | PASS | TypeScript 无错误；Vite 8.2.2，37 modules transformed |
+| `cargo fmt --check` | PASS | 使用 MSVC Rust toolchain |
+| `cargo clippy --all-targets --all-features -- -D warnings` | PASS | 无 lint 错误 |
+| `cargo test` | PASS | 30 passed，0 failed；包含 M3-M6 核心和 Git Source Windows 回归 |
+| `npm run tauri -- build --debug` | PASS | Windows x64 MSI 与 NSIS 均生成 |
+| `npm run desktop:dev` | PASS | Tauri 窗口响应正常，SQLite、Library 和本地日志初始化成功 |
+| Playwright 浏览器冒烟 | PASS | Skills、Bundles、Agents、Sync、Settings 导航和 Bundle Editor 可访问 |
+| 原生目录选择器完整窗口回放 | BLOCKED | 当前 CLI 无法连接 Tauri WebView2 调试端口；Rust command 链路由 30 项测试覆盖 |
+
+本次 Rust 测试发现并修复了 Windows Git checkout 使用 `\\?\\` verbatim path 导致 clone 失败的问题；Git 参数边界现使用兼容路径后，完整 Git Source 生命周期测试通过。测试过程使用的 Cargo/npm lockfile、临时 AppData 和截图均未纳入提交。

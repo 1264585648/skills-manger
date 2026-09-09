@@ -49,17 +49,15 @@ mod tests {
         let test_directory =
             std::env::temp_dir().join(format!("skills-manger-codex-path-{}", std::process::id()));
         fs::create_dir_all(&test_directory).expect("PATH directory should exist");
-        let executable = test_directory.join(if cfg!(windows) {
-            "codex.exe"
-        } else {
-            "codex"
-        });
+        let executable = test_directory.join(if cfg!(windows) { "codex.exe" } else { "codex" });
         fs::write(&executable, []).expect("executable fixture should write");
         let joined = std::env::join_paths([&test_directory]).expect("PATH should join");
 
         assert_eq!(
             find_executable(&joined).expect("Codex should be detected"),
-            executable.canonicalize().expect("fixture should canonicalize")
+            executable
+                .canonicalize()
+                .expect("fixture should canonicalize")
         );
         let _ = fs::remove_dir_all(test_directory);
     }
