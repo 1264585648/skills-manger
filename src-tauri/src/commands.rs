@@ -8,6 +8,7 @@ use crate::{
     bundle_planner::{self, BundleDraft, BundleRecord, SyncPlanRecord},
     error::CommandError,
     skill_preview::{self, SkillImportPreview},
+    safe_apply::{self, ApplyOperationRecord, DeploymentRecord},
     skills::{self, ImportSkillResult, SkillRecord},
     AppState,
 };
@@ -250,4 +251,43 @@ pub fn generate_sync_plan(
         ),
     );
     Ok(plan)
+}
+
+#[tauri::command]
+pub fn apply_sync_plan(
+    state: State<'_, AppState>,
+    plan_id: String,
+) -> Result<ApplyOperationRecord, CommandError> {
+    let app_data = state.library_root.parent().ok_or_else(|| {
+        CommandError::from(crate::error::AppError::State(
+            "application data directory is unavailable".to_string(),
+        ))
+    })?;
+    let operation = safe_apply::apply_sync_plan(
+        &state.db,
+        &app_data.join("operations"),
+        &plan_id,
+        agent_discovery::unix_timestamp().map_err(CommandError::from)?,
+    )
+    .map_err(CommandError::from)?;
+    let _ = state.log.write(
+        "info",
+        "sync_plan_applied",
+        &format!("operation {} finished as {}", operation.id, operation.status),
+    );
+    Ok(operation)
+}
+
+#[tauri::command]
+pub fn list_deployments(
+    state: State<'_, AppState>,
+) -> Result<Vec<DeploymentRecord>, CommandError> {
+    safe_apply::list_deployments(&state.db).map_err(CommandError::from)
+}
+
+#[tauri::command]
+pub fn list_apply_operations(
+    state: State<'_, AppState>,
+) -> Result<Vec<ApplyOperationRecord>, CommandError> {
+    safe_apply::list_apply_operations(&state.db).map_err(CommandError::from)
 }

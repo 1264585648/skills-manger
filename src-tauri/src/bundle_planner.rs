@@ -1,9 +1,11 @@
+use std::{path::Path, time::{SystemTime, UNIX_EPOCH}};
+
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::{db::Database, error::AppError};
+use crate::{db::Database, error::AppError, safe_apply, skills};
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct BundleItemRecord {
     pub skill_id: String,
@@ -11,7 +13,7 @@ pub struct BundleItemRecord {
     pub position: i64,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct BundleRecord {
     pub id: String,
@@ -38,7 +40,7 @@ pub struct BundleItemDraft {
     pub mode: String,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct SyncPlanItemRecord {
     pub id: String,
@@ -51,7 +53,7 @@ pub struct SyncPlanItemRecord {
     pub reason: String,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct SyncPlanRecord {
     pub id: String,
@@ -78,11 +80,7 @@ pub fn generate_sync_plan(
         .find(|root| root.id == root_id && root.enabled)
         .ok_or_else(|| AppError::State("enabled discovery root was not found".to_string()))?;
     let library = db.list_skills()?;
-    let instances = db
-        .list_skill_instances()?
-        .into_iter()
-        .filter(|instance| instance.root_id == root.id && instance.state == "unmanaged")
-        .collect::<Vec<_>>();
+    let root_path = Path::new(&root.configured_path);
 
     let mut items = Vec::new();
     let mut warnings = Vec::new();
@@ -96,37 +94,44 @@ pub fn generate_sync_plan(
                     bundle_item.skill_id
                 ))
             })?;
-        let matches = instances
-            .iter()
-            .filter(|instance| instance.name == skill.name)
-            .collect::<Vec<_>>();
-        let (action, current_hash, reason) = match matches.as_slice() {
-            [] => (
-                "add",
-                None,
-                "Skill is absent from the selected Agent root".to_string(),
-            ),
-            [instance] if instance.content_hash == skill.content_hash => (
-                "unchanged",
-                Some(instance.content_hash.clone()),
-                "Agent instance matches the Canonical Library hash".to_string(),
-            ),
-            [instance] => (
-                "conflict",
-                Some(instance.content_hash.clone()),
-                "Unmanaged Agent content differs; ownership must be resolved before any write"
-                    .to_string(),
-            ),
-            _ => {
-                warnings.push(format!(
-                    "multiple Agent instances match Skill '{}'",
-                    skill.name
-                ));
-                (
-                    "conflict",
-                    None,
-                    "Multiple Agent instances match this Library Skill".to_string(),
-                )
+        let destination = root_path.join(&skill.name);
+        let deployment = safe_apply::deployment_for(db, &skill.id, &root.id)?;
+        let (action, current_hash, reason) = if let Some(deployment) = deployment {
+            if Path::new(&deployment.destination_path) != destination {
+                warnings.push(format!("owned destination changed for Skill '{}'", skill.name));
+                ("conflict", None, "Deployment destination does not match the registered root".to_string())
+            } else if !destination.exists() {
+                ("add", None, "Owned Agent instance is missing and can be restored".to_string())
+            } else {
+                match skills::inspect_skill(&destination) {
+                    Ok(current) if current.content_hash != deployment.deployed_hash => (
+                        "conflict", Some(current.content_hash),
+                        "Target Drift differs from the last deployed hash".to_string(),
+                    ),
+                    Ok(current) if current.content_hash == skill.content_hash => (
+                        "unchanged", Some(current.content_hash),
+                        "Owned Agent instance matches the Canonical Library hash".to_string(),
+                    ),
+                    Ok(current) => (
+                        "update", Some(current.content_hash),
+                        "Owned Agent instance is clean and the Library hash changed".to_string(),
+                    ),
+                    Err(error) => ("conflict", None, format!("Owned Agent instance cannot be verified: {error}")),
+                }
+            }
+        } else if !destination.exists() {
+            ("add", None, "Skill is absent from the selected Agent root".to_string())
+        } else {
+            match skills::inspect_skill(&destination) {
+                Ok(current) if current.content_hash == skill.content_hash => (
+                    "unchanged", Some(current.content_hash),
+                    "Unmanaged Agent instance already matches the Library hash".to_string(),
+                ),
+                Ok(current) => (
+                    "conflict", Some(current.content_hash),
+                    "Unmanaged Agent content differs; ownership must be resolved before any write".to_string(),
+                ),
+                Err(error) => ("conflict", None, format!("Unmanaged destination cannot be verified: {error}")),
             }
         };
         items.push(SyncPlanItemRecord {
@@ -143,17 +148,24 @@ pub fn generate_sync_plan(
 
     let signature = items
         .iter()
-        .map(|item| format!("{}:{}:{}", item.skill_id, item.action, item.library_hash))
+        .map(|item| format!("{}:{}:{}:{}", item.skill_id, item.action, item.current_hash.as_deref().unwrap_or("-"), item.library_hash))
         .collect::<Vec<_>>()
         .join("|");
-    Ok(SyncPlanRecord {
+    let plan = SyncPlanRecord {
         id: hash_text(&format!("{}\0{}\0{}", bundle.id, root.id, signature)),
         bundle_id: bundle.id,
         root_id: root.id,
         requires_confirmation: items.iter().any(|item| item.action != "unchanged"),
         items,
         warnings,
-    })
+    };
+    safe_apply::persist_plan(db, &plan, unix_timestamp()?)?;
+    Ok(plan)
+}
+
+fn unix_timestamp() -> Result<i64, AppError> {
+    Ok(SystemTime::now().duration_since(UNIX_EPOCH)
+        .map_err(|error| AppError::State(format!("system clock error: {error}")))?.as_secs() as i64)
 }
 
 pub(crate) fn validate_bundle_draft(draft: &BundleDraft) -> Result<(), AppError> {
@@ -219,9 +231,9 @@ mod tests {
     };
 
     use crate::{
-        agent_discovery::{AgentTargetRecord, DiscoveryRootRecord, SkillInstanceDraft},
+        agent_discovery::{AgentTargetRecord, DiscoveryRootRecord},
         db::Database,
-        skills::SkillDraft,
+        skills::{self, SkillDraft},
     };
 
     use super::{generate_sync_plan, BundleDraft, BundleItemDraft};
@@ -238,11 +250,25 @@ mod tests {
         ));
         fs::create_dir_all(&test_dir).expect("test directory should exist");
         let database = Database::initialize(test_dir.join("planner.sqlite3")).expect("database");
-        for (id, name, hash) in [
-            ("skill-add", "add-skill", "hash-add"),
-            ("skill-same", "same-skill", "hash-same"),
-            ("skill-conflict", "conflict-skill", "hash-library"),
+        let library_root = test_dir.join("library");
+        let target_root = test_dir.join("target");
+        fs::create_dir_all(&library_root).expect("library should exist");
+        fs::create_dir_all(&target_root).expect("target should exist");
+        for (id, name) in [
+            ("skill-add", "add-skill"),
+            ("skill-same", "same-skill"),
+            ("skill-conflict", "conflict-skill"),
         ] {
+            let library_path = library_root.join(name);
+            fs::create_dir_all(&library_path).expect("skill should exist");
+            fs::write(
+                library_path.join("SKILL.md"),
+                format!("---\nname: {name}\ndescription: Planner fixture.\n---\n\nlibrary\n"),
+            )
+            .expect("manifest should write");
+            let hash = skills::inspect_skill(&library_path)
+                .expect("library skill should inspect")
+                .content_hash;
             database
                 .upsert_skill(&SkillDraft {
                     id: id.to_string(),
@@ -257,13 +283,25 @@ mod tests {
                     compatibility: None,
                     allowed_tools: None,
                     metadata_json: "{}".to_string(),
-                    content_hash: hash.to_string(),
-                    library_path: format!("C:/library/{name}"),
+                    content_hash: hash,
+                    library_path: library_path.to_string_lossy().into_owned(),
                     script_count: 0,
                     timestamp: 1,
                 })
                 .expect("skill should persist");
         }
+        skills::copy_tree(
+            &library_root.join("same-skill"),
+            &target_root.join("same-skill"),
+        )
+        .expect("matching target should copy");
+        let conflict_path = target_root.join("conflict-skill");
+        fs::create_dir_all(&conflict_path).expect("conflict target should exist");
+        fs::write(
+            conflict_path.join("SKILL.md"),
+            "---\nname: conflict-skill\ndescription: Planner fixture.\n---\n\ntarget drift\n",
+        )
+        .expect("conflict manifest should write");
         let target = AgentTargetRecord {
             id: "claude-code".to_string(),
             name: "Claude Code".to_string(),
@@ -280,43 +318,13 @@ mod tests {
             id: "root-1".to_string(),
             agent_id: target.id.clone(),
             scope: "project".to_string(),
-            configured_path: "C:/project/.claude/skills".to_string(),
-            canonical_path: None,
+            configured_path: target_root.to_string_lossy().into_owned(),
+            canonical_path: Some(target_root.to_string_lossy().into_owned()),
             enabled: true,
             is_default: false,
             last_warning: None,
         };
         database.upsert_discovery_root(&root, 1).expect("root");
-        database
-            .reconcile_root_instances(
-                &root.id,
-                &[
-                    SkillInstanceDraft {
-                        id: "instance-same".to_string(),
-                        agent_id: target.id.clone(),
-                        root_id: root.id.clone(),
-                        scope: root.scope.clone(),
-                        path: "C:/project/.claude/skills/same-skill".to_string(),
-                        name: "same-skill".to_string(),
-                        description: "Same".to_string(),
-                        content_hash: "hash-same".to_string(),
-                        script_count: 0,
-                    },
-                    SkillInstanceDraft {
-                        id: "instance-conflict".to_string(),
-                        agent_id: target.id,
-                        root_id: root.id.clone(),
-                        scope: root.scope.clone(),
-                        path: "C:/project/.claude/skills/conflict-skill".to_string(),
-                        name: "conflict-skill".to_string(),
-                        description: "Conflict".to_string(),
-                        content_hash: "hash-agent".to_string(),
-                        script_count: 0,
-                    },
-                ],
-                2,
-            )
-            .expect("instances");
         let bundle = database
             .upsert_bundle(
                 &BundleDraft {

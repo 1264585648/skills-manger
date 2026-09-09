@@ -145,8 +145,60 @@ impl Database {
                 FOREIGN KEY(skill_id) REFERENCES skills(id) ON DELETE RESTRICT
             );
 
+            CREATE TABLE IF NOT EXISTS sync_plans (
+                id TEXT PRIMARY KEY,
+                bundle_id TEXT NOT NULL,
+                root_id TEXT NOT NULL,
+                payload_json TEXT NOT NULL,
+                status TEXT NOT NULL CHECK(status IN ('previewed', 'running', 'applied', 'stale', 'failed')),
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                FOREIGN KEY(bundle_id) REFERENCES bundles(id) ON DELETE CASCADE,
+                FOREIGN KEY(root_id) REFERENCES discovery_roots(id) ON DELETE CASCADE
+            );
+
+            CREATE TABLE IF NOT EXISTS deployments (
+                id TEXT PRIMARY KEY,
+                skill_id TEXT NOT NULL,
+                root_id TEXT NOT NULL,
+                destination_path TEXT NOT NULL,
+                deployed_hash TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                UNIQUE(skill_id, root_id),
+                UNIQUE(root_id, destination_path),
+                FOREIGN KEY(skill_id) REFERENCES skills(id) ON DELETE RESTRICT,
+                FOREIGN KEY(root_id) REFERENCES discovery_roots(id) ON DELETE CASCADE
+            );
+
+            CREATE TABLE IF NOT EXISTS apply_operations (
+                id TEXT PRIMARY KEY,
+                plan_id TEXT NOT NULL,
+                status TEXT NOT NULL CHECK(status IN ('running', 'succeeded', 'rolled_back', 'rollback_failed')),
+                error TEXT,
+                started_at INTEGER NOT NULL,
+                finished_at INTEGER,
+                FOREIGN KEY(plan_id) REFERENCES sync_plans(id) ON DELETE RESTRICT
+            );
+
+            CREATE TABLE IF NOT EXISTS apply_operation_items (
+                operation_id TEXT NOT NULL,
+                skill_id TEXT NOT NULL,
+                action TEXT NOT NULL CHECK(action IN ('add', 'update')),
+                destination_path TEXT NOT NULL,
+                status TEXT NOT NULL CHECK(status IN ('pending', 'applied', 'rolled_back', 'failed')),
+                snapshot_path TEXT,
+                deployed_hash TEXT,
+                error TEXT,
+                position INTEGER NOT NULL,
+                PRIMARY KEY(operation_id, skill_id),
+                UNIQUE(operation_id, position),
+                FOREIGN KEY(operation_id) REFERENCES apply_operations(id) ON DELETE CASCADE,
+                FOREIGN KEY(skill_id) REFERENCES skills(id) ON DELETE RESTRICT
+            );
+
             INSERT INTO schema_meta (key, value)
-            VALUES ('schema_version', '4')
+            VALUES ('schema_version', '5')
             ON CONFLICT(key) DO UPDATE SET value = excluded.value;
             ",
         )?;
@@ -643,7 +695,7 @@ impl Database {
         Ok(value)
     }
 
-    fn connect(&self) -> Result<Connection, AppError> {
+    pub(crate) fn connect(&self) -> Result<Connection, AppError> {
         let connection = Connection::open(&self.path)?;
         connection.execute_batch(
             "
@@ -912,7 +964,7 @@ mod tests {
             reopened
                 .schema_version()
                 .expect("schema version should read"),
-            "4"
+            "5"
         );
         assert_eq!(
             reopened.list_agent_targets().expect("targets should list"),

@@ -1,5 +1,5 @@
 export type BundleItemMode = "required" | "optional";
-export type PlannerAction = "add" | "unchanged" | "conflict";
+export type PlannerAction = "add" | "update" | "unchanged" | "conflict";
 
 export interface BundleItemRecord {
   skillId: string;
@@ -41,4 +41,35 @@ export interface SyncPlanRecord {
   items: SyncPlanItemRecord[];
   warnings: string[];
   requiresConfirmation: boolean;
+}
+
+export interface ApplyOperationItemRecord {
+  skillId: string;
+  action: "add" | "update";
+  destinationPath: string;
+  status: "pending" | "applied" | "rolled_back" | "failed";
+  snapshotPath: string | null;
+  deployedHash: string | null;
+  error: string | null;
+  position: number;
+}
+
+export interface ApplyOperationRecord {
+  id: string;
+  planId: string;
+  status: "running" | "succeeded" | "rolled_back" | "rollback_failed";
+  error: string | null;
+  startedAt: number;
+  finishedAt: number | null;
+  items: ApplyOperationItemRecord[];
+}
+
+export interface DeploymentRecord {
+  id: string;
+  skillId: string;
+  rootId: string;
+  destinationPath: string;
+  deployedHash: string;
+  createdAt: number;
+  updatedAt: number;
 }

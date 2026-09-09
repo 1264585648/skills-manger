@@ -431,7 +431,7 @@ fn collect_files(
     Ok(())
 }
 
-fn copy_tree(source: &Path, destination: &Path) -> Result<(), AppError> {
+pub(crate) fn copy_tree(source: &Path, destination: &Path) -> Result<(), AppError> {
     fs::create_dir_all(destination)?;
 
     let mut entries = fs::read_dir(source)?.collect::<Result<Vec<_>, _>>()?;
@@ -463,7 +463,7 @@ fn copy_tree(source: &Path, destination: &Path) -> Result<(), AppError> {
     Ok(())
 }
 
-fn remove_if_exists(path: &Path) -> Result<(), AppError> {
+pub(crate) fn remove_if_exists(path: &Path) -> Result<(), AppError> {
     if path.is_dir() {
         fs::remove_dir_all(path)?;
     } else if path.exists() {

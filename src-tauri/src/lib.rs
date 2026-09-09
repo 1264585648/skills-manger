@@ -5,6 +5,7 @@ mod commands;
 mod db;
 mod error;
 mod logging;
+mod safe_apply;
 mod skill_preview;
 mod skills;
 
@@ -63,6 +64,9 @@ pub fn run() {
             commands::upsert_bundle,
             commands::delete_bundle,
             commands::generate_sync_plan,
+            commands::apply_sync_plan,
+            commands::list_deployments,
+            commands::list_apply_operations,
         ])
         .run(tauri::generate_context!())
         .expect("failed to run Skills Control Center");

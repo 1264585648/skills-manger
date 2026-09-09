@@ -13,7 +13,13 @@ import type {
   SkillInstanceRecord,
 } from "../types/discovery";
 import type { SkillImportCandidate, SkillImportPlan } from "../types/import";
-import type { BundleDraft, BundleRecord, SyncPlanRecord } from "../types/bundlePlanner";
+import type {
+  ApplyOperationRecord,
+  BundleDraft,
+  BundleRecord,
+  DeploymentRecord,
+  SyncPlanRecord,
+} from "../types/bundlePlanner";
 
 type LibrarySkillRecord = {
   id: string;
@@ -211,6 +217,25 @@ export const workspaceService = {
     } catch (error) {
       throw new Error(formatCommandError(error));
     }
+  },
+
+  async applySyncPlan(planId: string): Promise<ApplyOperationRecord> {
+    ensureDesktop();
+    try {
+      return await invoke<ApplyOperationRecord>("apply_sync_plan", { planId });
+    } catch (error) {
+      throw new Error(formatCommandError(error));
+    }
+  },
+
+  async getDeployments(): Promise<DeploymentRecord[]> {
+    if (!isTauriRuntime()) return [];
+    return invoke<DeploymentRecord[]>("list_deployments");
+  },
+
+  async getApplyOperations(): Promise<ApplyOperationRecord[]> {
+    if (!isTauriRuntime()) return [];
+    return invoke<ApplyOperationRecord[]>("list_apply_operations");
   },
   async getAgents(): Promise<Agent[]> {
     if (!isTauriRuntime()) return copy(mockAgents);
