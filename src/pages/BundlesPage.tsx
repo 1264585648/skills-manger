@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { confirm } from "@tauri-apps/plugin-dialog";
 import { Button, EmptyState, PageHeader, StatusPill } from "../components/ui";
 import { workspaceService } from "../services/workspaceService";
 import type { Bundle, Skill } from "../types/domain";
@@ -71,7 +72,7 @@ export function BundlesPage() {
     }
   };
   const remove = async () => {
-    if (!selected || !window.confirm(`删除 Bundle“${selected.name}”？不会删除任何 Skill 或 Agent 文件。`)) return;
+    if (!selected || !(await confirm(`删除 Bundle“${selected.name}”？不会删除任何 Skill 或 Agent 文件。`))) return;
     setBusy(true);
     try {
       await workspaceService.deleteBundle(selected.id);

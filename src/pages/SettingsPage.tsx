@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { confirm } from "@tauri-apps/plugin-dialog";
 import { Button, PageHeader, StatusPill, Toggle } from "../components/ui";
 import { diagnosticsService, type HealthSnapshot } from "../services/diagnosticsService";
 import { workspaceService } from "../services/workspaceService";
@@ -53,7 +54,7 @@ export function SettingsPage() {
   };
 
   const handleRemoveRoot = async (root: DiscoveryRootRecord): Promise<void> => {
-    if (!window.confirm(`仅移除发现配置，不会改动 Agent 文件：\n${root.configuredPath}`)) return;
+    if (!(await confirm(`仅移除发现配置，不会改动 Agent 文件：\n${root.configuredPath}`))) return;
     setBusy(true);
     try { await workspaceService.removeDiscoveryRoot(root.id); await loadManagedSettings(); }
     catch (rootError) { setError(rootError instanceof Error ? rootError.message : "移除发现目录失败"); }

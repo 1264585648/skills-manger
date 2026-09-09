@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { confirm } from "@tauri-apps/plugin-dialog";
 import { Button, EmptyState, PageHeader, StatusPill } from "../components/ui";
 import { workspaceService } from "../services/workspaceService";
 import type { Bundle } from "../types/domain";
@@ -76,7 +77,7 @@ export function SyncPage() {
 
   const apply = async (): Promise<void> => {
     if (!plan || !canApply) return;
-    const confirmed = window.confirm(
+    const confirmed = await confirm(
       `即将向 ${selectedRoot?.configuredPath ?? "所选 Agent Root"} 写入 ${changes} 个 Skill。\n\n应用前会再次校验计划、创建快照，并在失败时回滚。是否继续？`,
     );
     if (!confirmed) return;

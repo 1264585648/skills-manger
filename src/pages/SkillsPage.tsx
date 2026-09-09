@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { confirm } from "@tauri-apps/plugin-dialog";
 import { ImportWizard } from "../components/ImportWizard";
 import { Button, EmptyState, PageHeader, SearchField, StatusPill } from "../components/ui";
 import { workspaceService } from "../services/workspaceService";
@@ -111,7 +112,7 @@ export function SkillsPage() {
   };
 
   const handlePromoteSource = async (sourceId: string): Promise<void> => {
-    if (!window.confirm("将已检查的 upstream 版本提升为 Canonical Library。Agent 目标不会在此步骤被写入，是否继续？")) return;
+    if (!(await confirm("将已检查的 upstream 版本提升为 Canonical Library。Agent 目标不会在此步骤被写入，是否继续？"))) return;
     setSourceBusy(true);
     setNotice(null);
     try {
