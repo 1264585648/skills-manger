@@ -1,9 +1,11 @@
 mod agent_discovery;
 mod bundle_planner;
 mod claude_code;
+mod codex;
 mod commands;
 mod db;
 mod error;
+mod git_sources;
 mod logging;
 mod safe_apply;
 mod skill_preview;
@@ -33,7 +35,7 @@ pub fn run() {
 
             let log = AppLog::new(app_data_dir.join("skills-manager.log"))?;
             let db = Database::initialize(app_data_dir.join("skills-manager.sqlite3"))?;
-            agent_discovery::initialize_claude_code(&db)?;
+            agent_discovery::initialize_agents(&db)?;
 
             let _ = log.write(
                 "info",
@@ -56,6 +58,7 @@ pub fn run() {
             commands::import_skill_directory,
             commands::list_agent_targets,
             commands::scan_claude_code,
+            commands::scan_codex,
             commands::list_discovery_roots,
             commands::add_discovery_root,
             commands::remove_discovery_root,
@@ -67,6 +70,10 @@ pub fn run() {
             commands::apply_sync_plan,
             commands::list_deployments,
             commands::list_apply_operations,
+            commands::register_git_source,
+            commands::list_skill_updates,
+            commands::check_git_source,
+            commands::promote_git_source,
         ])
         .run(tauri::generate_context!())
         .expect("failed to run Skills Control Center");

@@ -32,18 +32,21 @@ export const mapAgentTarget = (
   lastScannedAt: record.lastScannedAt ?? undefined,
 });
 
-export const mapSkillInstance = (record: SkillInstanceRecord): Skill => ({
+export const mapSkillInstance = (
+  record: SkillInstanceRecord,
+  agentName = "Agent",
+): Skill => ({
   id: `instance:${record.id}`,
   name: record.name,
   description: record.description,
-  source: `Claude Code · ${record.scope === "user" ? "User" : "Project"}`,
+  source: `${agentName} · ${record.scope === "user" ? "User" : "Project"}`,
   sourcePath: record.path,
   contentHash: record.contentHash,
   version: "—",
   status: record.state,
   groups: [],
   bundles: [],
-  targets: ["Claude Code"],
+  targets: [agentName],
   lastUpdated: formatTimestamp(record.lastDiscoveredAt),
   security:
     record.scriptCount > 0
@@ -54,4 +57,13 @@ export const mapSkillInstance = (record: SkillInstanceRecord): Skill => ({
 export const mergeLibraryAndInstances = (
   librarySkills: Skill[],
   instances: SkillInstanceRecord[],
-): Skill[] => [...librarySkills, ...instances.map(mapSkillInstance)];
+  targets: AgentTargetRecord[] = [],
+): Skill[] => [
+  ...librarySkills,
+  ...instances.map((instance) =>
+    mapSkillInstance(
+      instance,
+      targets.find((target) => target.id === instance.agentId)?.name ?? "Agent",
+    ),
+  ),
+];

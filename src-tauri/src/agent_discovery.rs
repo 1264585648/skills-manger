@@ -8,9 +8,10 @@ use std::{
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
-use crate::{claude_code, db::Database, error::AppError, skills};
+use crate::{claude_code, codex, db::Database, error::AppError, skills};
 
 const CLAUDE_CODE_ID: &str = "claude-code";
+const CODEX_ID: &str = "codex";
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -78,6 +79,16 @@ pub struct AgentDiscoverySnapshot {
     pub warnings: Vec<String>,
 }
 
+pub fn initialize_agents(db: &Database) -> Result<(), AppError> {
+    initialize_claude_code(db)?;
+    let timestamp = unix_timestamp()?;
+    ensure_codex_target_registration(db, timestamp)?;
+    if let Some(home) = claude_code::current_home() {
+        ensure_codex_default_roots(db, &home, timestamp)?;
+    }
+    Ok(())
+}
+
 pub fn initialize_claude_code(db: &Database) -> Result<(), AppError> {
     let timestamp = unix_timestamp()?;
     ensure_target_registration(db, timestamp)?;
@@ -97,6 +108,47 @@ pub fn scan_claude_code(
     })?;
     let path_value = std::env::var_os("PATH").unwrap_or_default();
     scan_claude_code_with_environment(db, library_root, &home, &path_value, unix_timestamp()?)
+}
+
+pub fn scan_codex(
+    db: &Database,
+    library_root: &Path,
+) -> Result<AgentDiscoverySnapshot, AppError> {
+    let home = claude_code::current_home().ok_or_else(|| {
+        AppError::State("the current user home directory is unavailable".to_string())
+    })?;
+    let path_value = std::env::var_os("PATH").unwrap_or_default();
+    scan_codex_with_environment(db, library_root, &home, &path_value, unix_timestamp()?)
+}
+
+fn scan_codex_with_environment(
+    db: &Database,
+    library_root: &Path,
+    home: &Path,
+    path_value: &OsStr,
+    timestamp: i64,
+) -> Result<AgentDiscoverySnapshot, AppError> {
+    let mut target = detect_codex_target(Some((path_value, timestamp)));
+    let executable_warning = target.last_warning.clone();
+    db.upsert_agent_target(&target, timestamp)?;
+    ensure_codex_default_roots(db, home, timestamp)?;
+
+    let roots = db.list_discovery_roots()?;
+    let mut warnings = executable_warning.into_iter().collect::<Vec<_>>();
+    for root in roots
+        .iter()
+        .filter(|root| root.agent_id == CODEX_ID && root.enabled)
+    {
+        warnings.extend(scan_and_persist_root(db, root, library_root, timestamp)?);
+    }
+    target.last_warning = (!warnings.is_empty()).then(|| warnings.join("; "));
+    let target = db.upsert_agent_target(&target, timestamp)?;
+    Ok(AgentDiscoverySnapshot {
+        target,
+        roots: db.list_discovery_roots()?,
+        instances: db.list_skill_instances()?,
+        warnings,
+    })
 }
 
 fn scan_claude_code_with_environment(
@@ -168,6 +220,44 @@ pub fn register_project_root(
     db.upsert_discovery_root(&record, timestamp)
 }
 
+pub fn register_project_root_for_agent(
+    db: &Database,
+    library_root: &Path,
+    agent_id: &str,
+    path: impl AsRef<Path>,
+    timestamp: i64,
+) -> Result<DiscoveryRootRecord, AppError> {
+    if agent_id == CLAUDE_CODE_ID {
+        return register_project_root(db, library_root, path, timestamp);
+    }
+    if agent_id != CODEX_ID {
+        return Err(AppError::State("unsupported Agent adapter".to_string()));
+    }
+    let path = path.as_ref();
+    validate_real_directory(path)?;
+    let canonical = path.canonicalize()?;
+    validate_codex_project_skills_root(&canonical)?;
+    let canonical_library = library_root.canonicalize()?;
+    if canonical.starts_with(&canonical_library) {
+        return Err(AppError::InvalidSkill(
+            "managed Library paths cannot be registered as Agent roots".to_string(),
+        ));
+    }
+    ensure_codex_target_registration(db, timestamp)?;
+    let canonical_text = canonical.to_string_lossy().into_owned();
+    let record = DiscoveryRootRecord {
+        id: hash_text(&format!("{CODEX_ID}\0project\0{canonical_text}")),
+        agent_id: CODEX_ID.to_string(),
+        scope: "project".to_string(),
+        configured_path: canonical_text.clone(),
+        canonical_path: Some(canonical_text),
+        enabled: true,
+        is_default: false,
+        last_warning: None,
+    };
+    db.upsert_discovery_root(&record, timestamp)
+}
+
 fn ensure_target_registration(db: &Database, timestamp: i64) -> Result<(), AppError> {
     let already_registered = db
         .list_agent_targets()?
@@ -196,6 +286,69 @@ fn detect_target(environment: Option<(&OsStr, i64)>) -> AgentTargetRecord {
             .then(|| "Claude Code executable was not found on PATH".to_string()),
         last_scanned_at: environment.map(|(_, timestamp)| timestamp),
     }
+}
+
+fn ensure_codex_target_registration(db: &Database, timestamp: i64) -> Result<(), AppError> {
+    if !db
+        .list_agent_targets()?
+        .iter()
+        .any(|target| target.id == CODEX_ID)
+    {
+        db.upsert_agent_target(&detect_codex_target(None), timestamp)?;
+    }
+    Ok(())
+}
+
+fn detect_codex_target(environment: Option<(&OsStr, i64)>) -> AgentTargetRecord {
+    let executable = environment.and_then(|(path_value, _)| codex::find_executable(path_value));
+    let detected = executable.is_some();
+    AgentTargetRecord {
+        id: CODEX_ID.to_string(),
+        name: "Codex".to_string(),
+        provider: "OpenAI".to_string(),
+        capabilities: vec![
+            "detect".to_string(),
+            "read-skills".to_string(),
+            "safe-apply".to_string(),
+        ],
+        detected,
+        executable_path: executable.map(|path| path.to_string_lossy().into_owned()),
+        version: None,
+        last_warning: (environment.is_some() && !detected)
+            .then(|| "Codex executable was not found on PATH".to_string()),
+        last_scanned_at: environment.map(|(_, timestamp)| timestamp),
+    }
+}
+
+fn ensure_codex_default_roots(
+    db: &Database,
+    home: &Path,
+    timestamp: i64,
+) -> Result<(), AppError> {
+    for path in codex::default_user_skills_roots(home)
+        .into_iter()
+        .filter(|path| path.is_dir())
+    {
+        let configured_path = path.to_string_lossy().into_owned();
+        let canonical_path = path
+            .canonicalize()
+            .ok()
+            .map(|value| value.to_string_lossy().into_owned());
+        db.upsert_discovery_root(
+            &DiscoveryRootRecord {
+                id: hash_text(&format!("{CODEX_ID}\0user\0{configured_path}")),
+                agent_id: CODEX_ID.to_string(),
+                scope: "user".to_string(),
+                configured_path,
+                canonical_path,
+                enabled: true,
+                is_default: true,
+                last_warning: None,
+            },
+            timestamp,
+        )?;
+    }
+    Ok(())
 }
 
 fn ensure_default_user_root(
@@ -247,6 +400,25 @@ fn validate_project_skills_root(path: &Path) -> Result<(), AppError> {
     {
         return Err(AppError::InvalidSkill(
             "project discovery root must point to a .claude/skills directory".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_codex_project_skills_root(path: &Path) -> Result<(), AppError> {
+    let name = path.file_name().and_then(|value| value.to_str());
+    let parent = path
+        .parent()
+        .and_then(Path::file_name)
+        .and_then(|value| value.to_str());
+    if !name.is_some_and(|value| value.eq_ignore_ascii_case("skills"))
+        || !parent.is_some_and(|value| {
+            value.eq_ignore_ascii_case(".agents") || value.eq_ignore_ascii_case(".codex")
+        })
+    {
+        return Err(AppError::InvalidSkill(
+            "Codex project root must point to a .agents/skills or .codex/skills directory"
+                .to_string(),
         ));
     }
     Ok(())
@@ -814,6 +986,41 @@ mod tests {
                 .len(),
             1
         );
+
+        drop(database);
+        let _ = fs::remove_dir_all(test_directory);
+    }
+
+    #[test]
+    fn codex_project_root_accepts_only_bounded_skill_conventions() {
+        let test_directory = test_root("codex-project-root");
+        let valid_root = test_directory.join("project").join(".agents").join("skills");
+        let invalid_root = test_directory.join("project").join("skills");
+        let library = test_directory.join("library");
+        fs::create_dir_all(&valid_root).expect("valid root should exist");
+        fs::create_dir_all(&invalid_root).expect("invalid root should exist");
+        fs::create_dir_all(&library).expect("library should exist");
+        let database = Database::initialize(test_directory.join("skills.sqlite3"))
+            .expect("database should initialize");
+
+        let record = super::register_project_root_for_agent(
+            &database,
+            &library,
+            "codex",
+            &valid_root,
+            10,
+        )
+        .expect("Codex root should register");
+        assert_eq!(record.agent_id, "codex");
+        let error = super::register_project_root_for_agent(
+            &database,
+            &library,
+            "codex",
+            &invalid_root,
+            20,
+        )
+        .expect_err("unbounded root should fail");
+        assert!(error.to_string().contains(".agents/skills"));
 
         drop(database);
         let _ = fs::remove_dir_all(test_directory);

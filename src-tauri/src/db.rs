@@ -197,8 +197,36 @@ impl Database {
                 FOREIGN KEY(skill_id) REFERENCES skills(id) ON DELETE RESTRICT
             );
 
+            CREATE TABLE IF NOT EXISTS git_sources (
+                id TEXT PRIMARY KEY,
+                skill_id TEXT NOT NULL UNIQUE,
+                url TEXT NOT NULL,
+                reference TEXT NOT NULL,
+                skill_subpath TEXT NOT NULL,
+                checkout_path TEXT NOT NULL UNIQUE,
+                last_fetched_revision TEXT NOT NULL,
+                last_checked_at INTEGER NOT NULL,
+                last_error TEXT,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                FOREIGN KEY(skill_id) REFERENCES skills(id) ON DELETE CASCADE,
+                UNIQUE(url, reference, skill_subpath)
+            );
+
+            CREATE TABLE IF NOT EXISTS skill_tracking (
+                skill_id TEXT PRIMARY KEY,
+                git_source_id TEXT NOT NULL UNIQUE,
+                base_hash TEXT NOT NULL,
+                base_revision TEXT NOT NULL,
+                upstream_hash TEXT NOT NULL,
+                upstream_revision TEXT NOT NULL,
+                checked_at INTEGER NOT NULL,
+                FOREIGN KEY(skill_id) REFERENCES skills(id) ON DELETE CASCADE,
+                FOREIGN KEY(git_source_id) REFERENCES git_sources(id) ON DELETE CASCADE
+            );
+
             INSERT INTO schema_meta (key, value)
-            VALUES ('schema_version', '5')
+            VALUES ('schema_version', '6')
             ON CONFLICT(key) DO UPDATE SET value = excluded.value;
             ",
         )?;
@@ -964,7 +992,7 @@ mod tests {
             reopened
                 .schema_version()
                 .expect("schema version should read"),
-            "5"
+            "6"
         );
         assert_eq!(
             reopened.list_agent_targets().expect("targets should list"),

@@ -7,6 +7,7 @@ use crate::{
     },
     bundle_planner::{self, BundleDraft, BundleRecord, SyncPlanRecord},
     error::CommandError,
+    git_sources::{self, GitSourceDraft, SkillUpdateRecord},
     safe_apply::{self, ApplyOperationRecord, DeploymentRecord},
     skill_preview::{self, SkillImportPreview},
     skills::{self, ImportSkillResult, SkillRecord},
@@ -123,6 +124,25 @@ pub fn scan_claude_code(
 }
 
 #[tauri::command]
+pub fn scan_codex(
+    state: State<'_, AppState>,
+) -> Result<AgentDiscoverySnapshot, CommandError> {
+    let snapshot = agent_discovery::scan_codex(&state.db, &state.library_root)
+        .map_err(CommandError::from)?;
+    let _ = state.log.write(
+        "info",
+        "codex_scanned",
+        &format!(
+            "{} roots registered; {} instances recorded; {} warnings",
+            snapshot.roots.len(),
+            snapshot.instances.len(),
+            snapshot.warnings.len()
+        ),
+    );
+    Ok(snapshot)
+}
+
+#[tauri::command]
 pub fn list_discovery_roots(
     state: State<'_, AppState>,
 ) -> Result<Vec<DiscoveryRootRecord>, CommandError> {
@@ -134,15 +154,18 @@ pub fn add_discovery_root(
     state: State<'_, AppState>,
     path: String,
     scope: String,
+    agent_id: Option<String>,
 ) -> Result<DiscoveryRootRecord, CommandError> {
     if scope != "project" {
         return Err(CommandError::from(crate::error::AppError::State(
             "only project discovery roots can be added".to_string(),
         )));
     }
-    let record = agent_discovery::register_project_root(
+    let agent_id = agent_id.as_deref().unwrap_or("claude-code");
+    let record = agent_discovery::register_project_root_for_agent(
         &state.db,
         &state.library_root,
+        agent_id,
         path,
         agent_discovery::unix_timestamp().map_err(CommandError::from)?,
     )
@@ -150,7 +173,10 @@ pub fn add_discovery_root(
     let _ = state.log.write(
         "info",
         "discovery_root_added",
-        &format!("project root registered: {}", record.configured_path),
+        &format!(
+            "{} project root registered: {}",
+            record.agent_id, record.configured_path
+        ),
     );
     Ok(record)
 }
@@ -291,4 +317,70 @@ pub fn list_apply_operations(
     state: State<'_, AppState>,
 ) -> Result<Vec<ApplyOperationRecord>, CommandError> {
     safe_apply::list_apply_operations(&state.db).map_err(CommandError::from)
+}
+
+#[tauri::command]
+pub fn register_git_source(
+    state: State<'_, AppState>,
+    draft: GitSourceDraft,
+) -> Result<SkillUpdateRecord, CommandError> {
+    let app_data = state.library_root.parent().ok_or_else(|| {
+        CommandError::from(crate::error::AppError::State(
+            "application data directory is unavailable".to_string(),
+        ))
+    })?;
+    let record = git_sources::register_git_source(
+        &state.db,
+        &state.library_root,
+        &app_data.join("git-checkouts"),
+        &draft,
+        agent_discovery::unix_timestamp().map_err(CommandError::from)?,
+    )
+    .map_err(CommandError::from)?;
+    let _ = state.log.write(
+        "info",
+        "git_source_registered",
+        &format!("Git source registered for {}", record.skill_name),
+    );
+    Ok(record)
+}
+
+#[tauri::command]
+pub fn list_skill_updates(
+    state: State<'_, AppState>,
+) -> Result<Vec<SkillUpdateRecord>, CommandError> {
+    git_sources::list_update_statuses(&state.db).map_err(CommandError::from)
+}
+
+#[tauri::command]
+pub fn check_git_source(
+    state: State<'_, AppState>,
+    source_id: String,
+) -> Result<SkillUpdateRecord, CommandError> {
+    git_sources::check_git_source(
+        &state.db,
+        &source_id,
+        agent_discovery::unix_timestamp().map_err(CommandError::from)?,
+    )
+    .map_err(CommandError::from)
+}
+
+#[tauri::command]
+pub fn promote_git_source(
+    state: State<'_, AppState>,
+    source_id: String,
+) -> Result<ImportSkillResult, CommandError> {
+    let result = git_sources::promote_git_source(
+        &state.db,
+        &state.library_root,
+        &source_id,
+        agent_discovery::unix_timestamp().map_err(CommandError::from)?,
+    )
+    .map_err(CommandError::from)?;
+    let _ = state.log.write(
+        "info",
+        "git_source_promoted",
+        &format!("upstream promoted for {}", result.skill.name),
+    );
+    Ok(result)
 }

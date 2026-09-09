@@ -232,12 +232,134 @@ pub(crate) fn inspect_skill(root: &Path) -> Result<InspectedSkill, AppError> {
     })
 }
 
+pub(crate) fn import_tracked_skill_directory(
+    db: &Database,
+    library_root: &Path,
+    source: &Path,
+    source_id: &str,
+    source_locator: &str,
+) -> Result<ImportSkillResult, AppError> {
+    let canonical_source = source.canonicalize()?;
+    if !canonical_source.is_dir() {
+        return Err(AppError::InvalidSkill(
+            "tracked Skill path is not a directory".to_string(),
+        ));
+    }
+    let canonical_library = library_root.canonicalize()?;
+    if canonical_source.starts_with(&canonical_library) {
+        return Err(AppError::InvalidSkill(
+            "tracked source cannot be inside the managed Library".to_string(),
+        ));
+    }
+    let inspected = inspect_portable_skill(&canonical_source)?;
+    let existing = db.skill_by_identity(source_id, ".")?;
+    if let Some(skill) = &existing {
+        if skill.content_hash == inspected.content_hash && Path::new(&skill.library_path).is_dir() {
+            return Ok(ImportSkillResult {
+                outcome: "unchanged".to_string(),
+                skill: skill.clone(),
+            });
+        }
+    }
+
+    let skill_id = hash_text(&format!("{source_id}\0."));
+    let destination = library_root.join(&skill_id);
+    let staging = library_root.join(format!(".staging-{skill_id}"));
+    let backup = library_root.join(format!(".backup-{skill_id}"));
+    remove_if_exists(&staging)?;
+    remove_if_exists(&backup)?;
+    copy_tree(&canonical_source, &staging)?;
+    let staged_contents = match inspect_skill_contents(&staging, &inspected.name) {
+        Ok(contents) => contents,
+        Err(error) => {
+            let _ = remove_if_exists(&staging);
+            return Err(error);
+        }
+    };
+    let had_existing = destination.exists();
+    if had_existing {
+        fs::rename(&destination, &backup)?;
+    }
+    if let Err(error) = fs::rename(&staging, &destination) {
+        if had_existing && backup.exists() {
+            let _ = fs::rename(&backup, &destination);
+        }
+        return Err(AppError::Io(error));
+    }
+
+    let timestamp = unix_timestamp()?;
+    let draft = SkillDraft {
+        id: skill_id,
+        source_id: source_id.to_string(),
+        source_kind: "git".to_string(),
+        source_locator: source_locator.to_string(),
+        relative_path: ".".to_string(),
+        name: staged_contents.name,
+        description: staged_contents.description,
+        version: staged_contents.version,
+        license: staged_contents.license,
+        compatibility: staged_contents.compatibility,
+        allowed_tools: staged_contents.allowed_tools,
+        metadata_json: staged_contents.metadata_json,
+        content_hash: staged_contents.content_hash,
+        library_path: destination.to_string_lossy().into_owned(),
+        script_count: staged_contents.script_count,
+        timestamp,
+    };
+    match db.upsert_skill(&draft) {
+        Ok(skill) => {
+            remove_if_exists(&backup)?;
+            Ok(ImportSkillResult {
+                outcome: if existing.is_some() {
+                    "updated".to_string()
+                } else {
+                    "created".to_string()
+                },
+                skill,
+            })
+        }
+        Err(error) => {
+            let _ = remove_if_exists(&destination);
+            if had_existing && backup.exists() {
+                let _ = fs::rename(&backup, &destination);
+            }
+            Err(error)
+        }
+    }
+}
+
 pub(crate) fn inspect_managed_skill(
     root: &Path,
     expected_name: &str,
 ) -> Result<(String, i64), AppError> {
     let contents = inspect_skill_contents(root, expected_name)?;
     Ok((contents.content_hash, contents.script_count))
+}
+
+pub(crate) fn inspect_portable_skill(root: &Path) -> Result<InspectedSkill, AppError> {
+    let manifest_path = root.join("SKILL.md");
+    let metadata = fs::symlink_metadata(&manifest_path)?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(AppError::InvalidSkill(
+            "SKILL.md must be a regular file and cannot be a symbolic link".to_string(),
+        ));
+    }
+    let raw = fs::read_to_string(&manifest_path)?;
+    let manifest = parse_manifest(&raw)?;
+    let logical_name = manifest.name;
+    let contents = inspect_skill_contents(root, &logical_name)?;
+    let source_locator = root.to_string_lossy().into_owned();
+    let source_id = hash_text(&format!("local\0{source_locator}"));
+    let skill_id = hash_text(&format!("{source_id}\0."));
+    Ok(InspectedSkill {
+        source_path: root.to_path_buf(),
+        source_id,
+        skill_id,
+        name: contents.name,
+        description: contents.description,
+        content_hash: contents.content_hash,
+        script_count: contents.script_count,
+    })
 }
 
 fn inspect_skill_contents(root: &Path, expected_name: &str) -> Result<SkillContents, AppError> {

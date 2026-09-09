@@ -20,6 +20,7 @@ import type {
   DeploymentRecord,
   SyncPlanRecord,
 } from "../types/bundlePlanner";
+import type { GitSourceDraft, SkillUpdateRecord } from "../types/gitSources";
 
 type LibrarySkillRecord = {
   id: string;
@@ -100,11 +101,26 @@ const ensureDesktop = (): void => {
 export const workspaceService = {
   async getSkills(): Promise<Skill[]> {
     if (!isTauriRuntime()) return copy(mockSkills);
-    const [records, instances] = await Promise.all([
+    const [records, instances, targets, updates] = await Promise.all([
       invoke<LibrarySkillRecord[]>("list_library_skills"),
       invoke<SkillInstanceRecord[]>("list_skill_instances"),
+      invoke<AgentTargetRecord[]>("list_agent_targets"),
+      invoke<SkillUpdateRecord[]>("list_skill_updates"),
     ]);
-    return mergeLibraryAndInstances(records.map(mapLibrarySkill), instances);
+    const bySkill = new Map(updates.map((update) => [update.skillId, update]));
+    const library = records.map((record) => {
+      const skill = mapLibrarySkill(record);
+      const update = bySkill.get(record.id);
+      if (!update) return skill;
+      return {
+        ...skill,
+        status: update.status,
+        trackedSourceId: update.sourceId,
+        updateStatus: update.status,
+        canPromote: update.canPromote,
+      } satisfies Skill;
+    });
+    return mergeLibraryAndInstances(library, instances, targets);
   },
 
   async pickSkillDirectory(): Promise<string | null> {
@@ -256,6 +272,17 @@ export const workspaceService = {
     }
   },
 
+  async scanAgents(): Promise<AgentDiscoverySnapshot[]> {
+    ensureDesktop();
+    try {
+      const claude = await invoke<AgentDiscoverySnapshot>("scan_claude_code");
+      const codex = await invoke<AgentDiscoverySnapshot>("scan_codex");
+      return [claude, codex];
+    } catch (error) {
+      throw new Error(formatCommandError(error));
+    }
+  },
+
   async getDiscoveryRoots(): Promise<DiscoveryRootRecord[]> {
     if (!isTauriRuntime()) return [];
     return invoke<DiscoveryRootRecord[]>("list_discovery_roots");
@@ -272,12 +299,13 @@ export const workspaceService = {
     return Array.isArray(selection) ? selection[0] ?? null : selection;
   },
 
-  async addDiscoveryRoot(path: string): Promise<DiscoveryRootRecord> {
+  async addDiscoveryRoot(path: string, agentId = "claude-code"): Promise<DiscoveryRootRecord> {
     ensureDesktop();
     try {
       return await invoke<DiscoveryRootRecord>("add_discovery_root", {
         path,
         scope: "project",
+        agentId,
       });
     } catch (error) {
       throw new Error(formatCommandError(error));
@@ -288,6 +316,41 @@ export const workspaceService = {
     ensureDesktop();
     try {
       await invoke("remove_discovery_root", { id });
+    } catch (error) {
+      throw new Error(formatCommandError(error));
+    }
+  },
+  async registerGitSource(draft: GitSourceDraft): Promise<SkillUpdateRecord> {
+    ensureDesktop();
+    try {
+      return await invoke<SkillUpdateRecord>("register_git_source", { draft });
+    } catch (error) {
+      throw new Error(formatCommandError(error));
+    }
+  },
+
+  async getSkillUpdates(): Promise<SkillUpdateRecord[]> {
+    if (!isTauriRuntime()) return [];
+    return invoke<SkillUpdateRecord[]>("list_skill_updates");
+  },
+
+  async checkGitSource(sourceId: string): Promise<SkillUpdateRecord> {
+    ensureDesktop();
+    try {
+      return await invoke<SkillUpdateRecord>("check_git_source", { sourceId });
+    } catch (error) {
+      throw new Error(formatCommandError(error));
+    }
+  },
+
+  async promoteGitSource(sourceId: string): Promise<ImportSkillResult> {
+    ensureDesktop();
+    try {
+      const result = await invoke<{
+        outcome: ImportSkillResult["outcome"];
+        skill: LibrarySkillRecord;
+      }>("promote_git_source", { sourceId });
+      return { outcome: result.outcome, skill: mapLibrarySkill(result.skill) };
     } catch (error) {
       throw new Error(formatCommandError(error));
     }

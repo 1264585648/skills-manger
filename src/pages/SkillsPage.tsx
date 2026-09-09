@@ -8,6 +8,9 @@ import type { SkillImportPlan } from "../types/import";
 const statusMeta: Record<SkillStatus, { label: string; tone: "green" | "amber" | "red" | "blue" | "gray" }> = {
   clean: { label: "Clean", tone: "green" },
   update: { label: "Update", tone: "amber" },
+  upstream_update: { label: "Upstream Update", tone: "amber" },
+  local_modified: { label: "Local Modified", tone: "red" },
+  target_drift: { label: "Target Drift", tone: "red" },
   unmanaged: { label: "Unmanaged", tone: "gray" },
   conflict: { label: "Conflict", tone: "red" },
   missing: { label: "Missing", tone: "red" },
@@ -25,6 +28,7 @@ export function SkillsPage() {
   const [executingImport, setExecutingImport] = useState(false);
   const [importPlan, setImportPlan] = useState<SkillImportPlan | null>(null);
   const [notice, setNotice] = useState<Notice>(null);
+  const [sourceBusy, setSourceBusy] = useState(false);
 
   const loadSkills = useCallback(async () => {
     setLoading(true);
@@ -91,6 +95,35 @@ export function SkillsPage() {
     }
   };
 
+  const handleCheckSource = async (sourceId: string): Promise<void> => {
+    setSourceBusy(true);
+    setNotice(null);
+    try {
+      const update = await workspaceService.checkGitSource(sourceId);
+      await loadSkills();
+      setNotice({ tone: "success", text: `检查完成：${update.skillName} · ${update.status}` });
+    } catch (error) {
+      setNotice({ tone: "error", text: error instanceof Error ? error.message : "检查 Git Source 失败" });
+    } finally {
+      setSourceBusy(false);
+    }
+  };
+
+  const handlePromoteSource = async (sourceId: string): Promise<void> => {
+    if (!window.confirm("将已检查的 upstream 版本提升为 Canonical Library。Agent 目标不会在此步骤被写入，是否继续？")) return;
+    setSourceBusy(true);
+    setNotice(null);
+    try {
+      const result = await workspaceService.promoteGitSource(sourceId);
+      await loadSkills();
+      setNotice({ tone: "success", text: `${result.skill.name} 已更新到 upstream；请在 Sync 中审阅目标部署计划。` });
+    } catch (error) {
+      setNotice({ tone: "error", text: error instanceof Error ? error.message : "提升 upstream 失败" });
+    } finally {
+      setSourceBusy(false);
+    }
+  };
+
   const groups = useMemo(
     () => ["全部", ...Array.from(new Set(skills.flatMap((item) => item.groups)))],
     [skills],
@@ -113,7 +146,7 @@ export function SkillsPage() {
   const libraryCount = skills.filter((skill) => !skill.id.startsWith("instance:")).length;
   const unmanagedCount = skills.filter((skill) => skill.status === "unmanaged").length;
   const attentionCount = skills.filter((skill) => skill.status !== "clean").length;
-  const selectedIsDiscovery = selected?.status === "unmanaged" || selected?.status === "missing";
+  const selectedIsDiscovery = selected?.id.startsWith("instance:") ?? false;
 
   return <section className="page">
     <PageHeader
@@ -219,11 +252,13 @@ export function SkillsPage() {
               <div><dt>安全</dt><dd>{selected.security}</dd></div>
               <div><dt>License</dt><dd>{selected.license ?? "—"}</dd></div>
               <div><dt>更新</dt><dd>{selected.lastUpdated}</dd></div>
+              {selected.updateStatus ? <div><dt>三线状态</dt><dd>{selected.updateStatus}</dd></div> : null}
             </dl>
           </div>
           {selectedIsDiscovery ? <p className="readonly-discovery-note">只读发现，尚未纳入 Library；不会写入或执行 Agent 目录内容。</p> : null}
           <div className="inspector-actions">
-            <Button variant="primary" disabled>部署到 Agent</Button>
+            {selected.trackedSourceId ? <Button disabled={sourceBusy} onClick={() => void handleCheckSource(selected.trackedSourceId!)}>{sourceBusy ? "检查中…" : "检查 Git 更新"}</Button> : null}
+            {selected.trackedSourceId && selected.canPromote ? <Button variant="primary" disabled={sourceBusy} onClick={() => void handlePromoteSource(selected.trackedSourceId!)}>提升 Upstream</Button> : null}
             <Button onClick={() => void loadSkills()}>重新读取</Button>
           </div>
         </> : null}

@@ -16,7 +16,7 @@ export interface SkillTrust {
   score?: number;
 }
 
-export type SkillStatus = "clean" | "update" | "unmanaged" | "conflict" | "missing";
+export type SkillStatus = "clean" | "update" | "upstream_update" | "local_modified" | "target_drift" | "unmanaged" | "conflict" | "missing";
 
 export interface Skill {
   id: string;
@@ -36,6 +36,9 @@ export interface Skill {
   license?: string;
   compatibility?: string;
   allowedTools?: string;
+  trackedSourceId?: string;
+  updateStatus?: string;
+  canPromote?: boolean;
 }
 
 export interface Bundle {
