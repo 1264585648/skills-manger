@@ -277,6 +277,13 @@ Draft PR [#3](https://github.com/1264585648/skills-manger/pull/3) 的 Run `34246
 | `npm run tauri -- build --debug` | PASS | Windows x64 MSI 与 NSIS 均生成 |
 | `npm run desktop:dev` | PASS | Tauri 窗口响应正常，SQLite、Library 和本地日志初始化成功 |
 | Playwright 浏览器冒烟 | PASS | Skills、Bundles、Agents、Sync、Settings 导航和 Bundle Editor 可访问 |
-| 原生目录选择器完整窗口回放 | BLOCKED | 当前 CLI 无法连接 Tauri WebView2 调试端口；Rust command 链路由 30 项测试覆盖 |
+| Tauri WebView2 Playwright attach | PASS | 通过本机 CDP 端口连接真实桌面 WebView |
+| Agent Discovery | PASS | Claude Code/Codex 扫描、User roots、Unmanaged Skill 显示正常 |
+| Skill 导入与 Library 刷新 | PASS | 真实 Rust preview/import/list 链路通过；`allowed-tools` 列表与 scripts 安全摘要正确 |
+| Bundle CRUD | PASS | 真实窗口新建 Bundle 并持久化 1 个 Canonical Skill |
+| Safe Apply | PASS | 真实窗口生成计划、确认新增、快照、复制、哈希 Verify 和操作记录通过 |
+| Unmanaged collision | PASS | 同名目标内容形成 conflict，Apply 按钮保持禁用 |
+| 原生目录选择器交互 | BLOCKED | 当前 CLI 无法可靠驱动系统文件选择器；测试使用固定路径驱动，Rust preview/import 仍为真实调用 |
+| Git Source UI clone | BLOCKED | QA 隔离进程未继承本机 Git 代理，HTTPS clone 返回连接失败；M6 本地 Git fixture 测试通过 |
 
-本次 Rust 测试发现并修复了 Windows Git checkout 使用 `\\?\\` verbatim path 导致 clone 失败的问题；Git 参数边界现使用兼容路径后，完整 Git Source 生命周期测试通过。测试过程使用的 Cargo/npm lockfile、临时 AppData 和截图均未纳入提交。
+本次 Rust 测试发现并修复了 Windows Git checkout 使用 `\\?\\` verbatim path 导致 clone 失败的问题；桌面回放又补充修复了 `dialog.confirm` capability 缺失和复制失败后 staging 残留。测试过程使用的 Cargo/npm lockfile、临时 AppData 和截图均未纳入提交。

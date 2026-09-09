@@ -145,7 +145,10 @@ pub fn import_skill_directory(
 
     remove_if_exists(&staging)?;
     remove_if_exists(&backup)?;
-    copy_tree(&inspected.source_path, &staging)?;
+    if let Err(error) = copy_tree(&inspected.source_path, &staging) {
+        let _ = remove_if_exists(&staging);
+        return Err(error);
+    }
     let staged_contents = match inspect_skill_contents(&staging, &inspected.name) {
         Ok(contents) => contents,
         Err(error) => {
@@ -268,7 +271,10 @@ pub(crate) fn import_tracked_skill_directory(
     let backup = library_root.join(format!(".backup-{skill_id}"));
     remove_if_exists(&staging)?;
     remove_if_exists(&backup)?;
-    copy_tree(&canonical_source, &staging)?;
+    if let Err(error) = copy_tree(&canonical_source, &staging) {
+        let _ = remove_if_exists(&staging);
+        return Err(error);
+    }
     let staged_contents = match inspect_skill_contents(&staging, &inspected.name) {
         Ok(contents) => contents,
         Err(error) => {

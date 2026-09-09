@@ -31,6 +31,7 @@ export function SkillsPage() {
   const [sourceBusy, setSourceBusy] = useState(false);
 
   const loadSkills = useCallback(async () => {
+    setNotice(null);
     setLoading(true);
     try {
       const items = await workspaceService.getSkills();
