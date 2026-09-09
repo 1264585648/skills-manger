@@ -23,6 +23,139 @@
   letter-spacing: .01em;
 }
 
+/* ---- 冲突处置（Sync 计划） ---- */
+.conflict-card .conflict-head strong {
+  font-size: 12px;
+}
+
+.conflict-card .conflict-head p {
+  font-size: 11px;
+  line-height: 1.55;
+  color: #8a5f5f;
+}
+
+.conflict-list {
+  display: grid;
+  gap: 9px;
+  margin-top: 13px;
+}
+
+.conflict-item {
+  padding: 11px 12px;
+  border: 1px solid #ecdada;
+  border-radius: 9px;
+  background: #fffdfd;
+}
+
+.conflict-item-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.conflict-item-head strong {
+  font-size: 12px;
+}
+
+.conflict-reason {
+  margin: 6px 0 0;
+  font-size: 10px;
+  line-height: 1.5;
+  color: #9c6a6a;
+}
+
+.conflict-hint {
+  margin: 4px 0 0;
+  font-size: 11px;
+  line-height: 1.55;
+  color: #6f6a6a;
+}
+
+.conflict-path {
+  display: block;
+  margin-top: 8px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: #f7f3f3;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+  color: #7d5c5c;
+  overflow-wrap: anywhere;
+}
+
+.conflict-hash {
+  margin: 6px 0 0;
+  font-size: 10px;
+  color: #9a8a8a;
+}
+
+.conflict-hash code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  color: #7d5c5c;
+}
+
+.conflict-copy-failed {
+  margin: 6px 0 0;
+  font-size: 10px;
+  color: #b23e3e;
+}
+
+.resolution-options .resolution {
+  font-size: 11px;
+  padding: 7px 11px;
+}
+
+.resolution-options .resolution:disabled {
+  opacity: .6;
+  cursor: default;
+}
+
+/* ---- 当前部署 ---- */
+.deployment-panel {
+  margin-top: 16px;
+}
+
+.deployment-panel .section-label {
+  display: block;
+  margin-bottom: 7px;
+}
+
+.deployment-list {
+  display: grid;
+  gap: 6px;
+}
+
+.deployment-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 7px 9px;
+  border: 1px solid #eef0f3;
+  border-radius: 7px;
+  background: #fafbfc;
+}
+
+.deployment-row > span {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.deployment-row strong {
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.deployment-row small {
+  margin-top: 2px;
+  font-size: 9px;
+  color: #9aa1ae;
+}
+
 .settings-section-flush {
   margin-top: 18px;
 }

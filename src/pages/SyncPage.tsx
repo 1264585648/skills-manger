@@ -1,9 +1,18 @@
 import { useEffect, useMemo, useState } from "react";
 import { confirm } from "@tauri-apps/plugin-dialog";
 import { Button, EmptyState, PageHeader, StatusPill } from "../components/ui";
+import { ConflictResolver } from "../components/ConflictResolver";
 import { workspaceService } from "../services/workspaceService";
+import { formatTimestamp } from "../services/formatTimestamp";
+import { baseName } from "../services/conflictRules";
+import { openAgentRootDirectory } from "../services/agentPathService";
 import type { Bundle } from "../types/domain";
-import type { ApplyOperationRecord, SyncPlanRecord } from "../types/bundlePlanner";
+import type {
+  ApplyOperationRecord,
+  DeploymentRecord,
+  SyncPlanItemRecord,
+  SyncPlanRecord,
+} from "../types/bundlePlanner";
 import type { DiscoveryRootRecord } from "../types/discovery";
 
 const actionMeta = {
@@ -24,6 +33,7 @@ export function SyncPage({ initialBundleId }: { initialBundleId?: string | null 
   const [bundles, setBundles] = useState<Bundle[]>([]);
   const [roots, setRoots] = useState<DiscoveryRootRecord[]>([]);
   const [operations, setOperations] = useState<ApplyOperationRecord[]>([]);
+  const [deployments, setDeployments] = useState<DeploymentRecord[]>([]);
   const [bundleId, setBundleId] = useState("");
   const [rootId, setRootId] = useState("");
   const [plan, setPlan] = useState<SyncPlanRecord | null>(null);
@@ -31,6 +41,7 @@ export function SyncPage({ initialBundleId }: { initialBundleId?: string | null 
   const [loading, setLoading] = useState(true);
   const [generating, setGenerating] = useState(false);
   const [applying, setApplying] = useState(false);
+  const [resolvingId, setResolvingId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -38,12 +49,14 @@ export function SyncPage({ initialBundleId }: { initialBundleId?: string | null 
       workspaceService.getBundles(),
       workspaceService.getDiscoveryRoots(),
       workspaceService.getApplyOperations(),
+      workspaceService.getDeployments(),
     ])
-      .then(([nextBundles, nextRoots, nextOperations]) => {
+      .then(([nextBundles, nextRoots, nextOperations, nextDeployments]) => {
         const enabledRoots = nextRoots.filter((root) => root.enabled);
         setBundles(nextBundles);
         setRoots(enabledRoots);
         setOperations(nextOperations);
+        setDeployments(nextDeployments);
         const preferred = initialBundleId && nextBundles.some((bundle) => bundle.id === initialBundleId)
           ? initialBundleId
           : nextBundles[0]?.id ?? "";
@@ -60,9 +73,20 @@ export function SyncPage({ initialBundleId }: { initialBundleId?: string | null 
     () => roots.find((root) => root.id === rootId) ?? null,
     [rootId, roots],
   );
-  const conflicts = plan?.items.filter((item) => item.action === "conflict").length ?? 0;
+  const conflictItems = useMemo(
+    () => plan?.items.filter((item) => item.action === "conflict") ?? [],
+    [plan],
+  );
+  const conflicts = conflictItems.length;
   const changes = plan?.items.filter((item) => item.action !== "unchanged").length ?? 0;
   const canApply = Boolean(plan && changes > 0 && conflicts === 0 && !applying && !generating);
+  const rootDeployments = useMemo(
+    () =>
+      deployments
+        .filter((deployment) => deployment.rootId === rootId)
+        .sort((left, right) => right.updatedAt - left.updatedAt),
+    [deployments, rootId],
+  );
 
   const generate = async (): Promise<void> => {
     if (!bundleId || !rootId) return;
@@ -99,6 +123,45 @@ export function SyncPage({ initialBundleId }: { initialBundleId?: string | null 
     }
   };
 
+  const excludeFromBundle = async (item: SyncPlanItemRecord): Promise<void> => {
+    if (!bundleId) return;
+    setResolvingId(item.skillId);
+    setError(null);
+    try {
+      const records = await workspaceService.getBundleRecords();
+      const record = records.find((candidate) => candidate.id === bundleId);
+      if (!record) {
+        setError("未找到当前 Bundle，无法排除该 Skill");
+        return;
+      }
+      const nextItems = record.items
+        .filter((bundleItem) => bundleItem.skillId !== item.skillId)
+        .map((bundleItem) => ({ skillId: bundleItem.skillId, mode: bundleItem.mode }));
+      await workspaceService.saveBundle({
+        id: record.id,
+        name: record.name,
+        description: record.description,
+        items: nextItems,
+      });
+      setPlan(await workspaceService.generateSyncPlan(bundleId, rootId));
+    } catch (excludeError) {
+      setError(excludeError instanceof Error ? excludeError.message : "排除 Skill 失败");
+    } finally {
+      setResolvingId(null);
+    }
+  };
+
+  const openDirectory = async (): Promise<void> => {
+    setError(null);
+    try {
+      await openAgentRootDirectory(rootId);
+    } catch (openError) {
+      setError(
+        `${openError instanceof Error ? openError.message : "打开目录失败"}（可改用“复制路径”手动定位）`,
+      );
+    }
+  };
+
   return (
     <section className="page">
       <PageHeader title="Sync" subtitle="先生成不可变计划，再经漂移检查、快照和哈希验证安全写入 Agent。" />
@@ -131,6 +194,15 @@ export function SyncPage({ initialBundleId }: { initialBundleId?: string | null 
               return <div className="sync-row" key={item.id}><span className="sync-skill"><i className="skill-glyph">S</i><span><strong>{item.skillName}</strong><small>{item.mode} · {item.reason}</small></span></span><span className="version-flow"><small>{item.currentHash?.slice(0, 12) ?? "—"}</small><b>→</b><small>{item.libraryHash.slice(0, 12)}</small></span><StatusPill tone={meta.tone}>{meta.label}</StatusPill></div>;
             })}</div>
           )}
+          {conflicts > 0 && selectedRoot ? (
+            <ConflictResolver
+              items={conflictItems}
+              rootPath={selectedRoot.configuredPath}
+              busySkillId={resolvingId}
+              onExclude={(item) => void excludeFromBundle(item)}
+              onOpenDirectory={() => void openDirectory()}
+            />
+          ) : null}
           {plan?.warnings.map((warning) => <div className="discovery-warning" key={warning}>{warning}</div>)}
           <div className="sync-steps" aria-label="安全应用流程"><span className="done">Resolve</span><b>→</b><span className="done">Drift Check</span><b>→</b><span className={applying ? "current" : ""}>Snapshot</span><b>→</b><span className={applying ? "current" : ""}>Apply</span><b>→</b><span className={lastOperation ? "done" : ""}>Verify</span></div>
         </section>
@@ -139,7 +211,26 @@ export function SyncPage({ initialBundleId }: { initialBundleId?: string | null 
           <div className="inspector-title simple"><div><h2>同步摘要</h2><p>只有本应用拥有且无漂移的目标，才允许自动更新。</p></div></div>
           <dl className="detail-list spacious"><div><dt>计划</dt><dd>{plan?.id.slice(0, 12) ?? "—"}</dd></div><div><dt>变更</dt><dd>{changes}</dd></div><div><dt>冲突</dt><dd>{conflicts}</dd></div></dl>
           <div className="verify-box"><span className="section-label">执行边界</span><p>✓ 应用前重新校验计划与目标漂移</p><p>✓ 脚本仅复制，绝不执行</p><p>✓ 同盘原子替换、哈希验证和反向回滚</p></div>
-          <div className="inspector-actions"><Button variant="primary" disabled={!canApply} onClick={() => void apply()}>{applying ? "正在安全应用…" : conflicts > 0 ? "存在冲突，禁止应用" : changes === 0 ? "目标已是最新" : `应用 ${changes} 项变更`}</Button><Button disabled={!plan || applying} onClick={() => void generate()}>重新校验</Button></div>
+          <div className="inspector-actions"><Button variant="primary" disabled={!canApply} onClick={() => void apply()}>{applying ? "正在安全应用…" : conflicts > 0 ? `先处置 ${conflicts} 项冲突` : changes === 0 ? "目标已是最新" : `应用 ${changes} 项变更`}</Button><Button disabled={!plan || applying} onClick={() => void generate()}>重新校验</Button></div>
+
+          <div className="deployment-panel">
+            <span className="section-label">当前 Root 已部署 {rootDeployments.length}</span>
+            {rootDeployments.length === 0 ? (
+              <p className="operation-empty">该 Root 下还没有本应用部署的 Skill。</p>
+            ) : (
+              <div className="deployment-list">
+                {rootDeployments.slice(0, 6).map((deployment) => (
+                  <div className="deployment-row" key={deployment.id} title={deployment.destinationPath}>
+                    <span>
+                      <strong>{baseName(deployment.destinationPath)}</strong>
+                      <small>{formatTimestamp(deployment.updatedAt)}</small>
+                    </span>
+                    <code className="plan-hash">{deployment.deployedHash.slice(0, 12)}</code>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
 
           <div className="operation-history"><span className="section-label">最近操作</span>{operations.length === 0 ? <p className="operation-empty">暂无写入记录</p> : operations.slice(0, 3).map((operation) => {
             const meta = operationMeta[operation.status];
