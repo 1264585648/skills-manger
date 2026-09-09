@@ -83,7 +83,10 @@ pub fn generate_sync_plan(
         .find(|root| root.id == root_id && root.enabled)
         .ok_or_else(|| AppError::State("enabled discovery root was not found".to_string()))?;
     let library = db.list_skills()?;
-    let root_path = Path::new(&root.configured_path);
+    let configured_root = Path::new(&root.configured_path);
+    let root_path = configured_root
+        .canonicalize()
+        .unwrap_or_else(|_| configured_root.to_path_buf());
 
     let mut items = Vec::new();
     let mut warnings = Vec::new();
