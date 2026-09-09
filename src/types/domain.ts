@@ -1,21 +1,5 @@
 export type PageKey = "home" | "skills" | "bundles" | "agents" | "sync" | "settings";
 
-export interface Environment {
-  id: string;
-  name: string;
-  description: string;
-  agents: string[];
-  skills: number;
-  updatedAt: string;
-}
-
-export interface SkillTrust {
-  source: string;
-  license?: string;
-  risk: string[];
-  score?: number;
-}
-
 export type SkillStatus = "clean" | "update" | "upstream_update" | "local_modified" | "target_drift" | "unmanaged" | "conflict" | "missing";
 
 export interface Skill {

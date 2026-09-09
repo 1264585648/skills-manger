@@ -356,5 +356,40 @@ export const workspaceService = {
     }
   },
   async getSyncItems(): Promise<SyncItem[]> { return copy(mockSyncItems); },
-  async getSources(): Promise<SourceConfig[]> { return copy(mockSources); },
+
+  async getSources(): Promise<SourceConfig[]> {
+    if (!isTauriRuntime()) return copy(mockSources);
+    const [records, roots, updates] = await Promise.all([
+      invoke<LibrarySkillRecord[]>("list_library_skills"),
+      invoke<DiscoveryRootRecord[]>("list_discovery_roots"),
+      invoke<SkillUpdateRecord[]>("list_skill_updates"),
+    ]);
+    const gitRepositories = new Set(updates.map((update) => update.sourceId)).size;
+    const localImports = records.filter((record) => record.sourceKind === "local").length;
+    const enabledRoots = roots.filter((root) => root.enabled).length;
+
+    return [
+      {
+        id: "source-git",
+        name: "Git Repository",
+        description: "跟踪仓库、分支与相对路径。",
+        detail: `${gitRepositories} 个仓库`,
+        enabled: gitRepositories > 0,
+      },
+      {
+        id: "source-local",
+        name: "本地目录",
+        description: "你主动导入的本地 Skill 目录。",
+        detail: `${localImports} 个本地导入`,
+        enabled: localImports > 0,
+      },
+      {
+        id: "source-agent",
+        name: "Agent 发现目录",
+        description: "只读扫描已登记 Agent 的 Skill 目录。",
+        detail: `${enabledRoots} 个已启用 root`,
+        enabled: enabledRoots > 0,
+      },
+    ];
+  },
 };

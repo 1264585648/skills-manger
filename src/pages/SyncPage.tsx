@@ -20,7 +20,7 @@ const operationMeta = {
   rollback_failed: { label: "回滚失败", tone: "red" as const },
 };
 
-export function SyncPage() {
+export function SyncPage({ initialBundleId }: { initialBundleId?: string | null }) {
   const [bundles, setBundles] = useState<Bundle[]>([]);
   const [roots, setRoots] = useState<DiscoveryRootRecord[]>([]);
   const [operations, setOperations] = useState<ApplyOperationRecord[]>([]);
@@ -44,7 +44,10 @@ export function SyncPage() {
         setBundles(nextBundles);
         setRoots(enabledRoots);
         setOperations(nextOperations);
-        setBundleId(nextBundles[0]?.id ?? "");
+        const preferred = initialBundleId && nextBundles.some((bundle) => bundle.id === initialBundleId)
+          ? initialBundleId
+          : nextBundles[0]?.id ?? "";
+        setBundleId(preferred);
         setRootId(enabledRoots[0]?.id ?? "");
       })
       .catch((loadError: unknown) =>

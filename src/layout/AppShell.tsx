@@ -2,7 +2,7 @@ import type { ReactNode } from "react";
 import type { PageKey } from "../types/domain";
 
 const navigation: Array<{ id: PageKey; label: string; icon: string }> = [
-  { id: "home", label: "我的环境", icon: "⌂" },
+  { id: "home", label: "概览", icon: "⌂" },
   { id: "skills", label: "Skills", icon: "S" },
   { id: "bundles", label: "工作流", icon: "W" },
   { id: "agents", label: "Agents", icon: "A" },

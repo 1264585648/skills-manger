@@ -22,3 +22,7 @@
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   letter-spacing: .01em;
 }
+
+.settings-section-flush {
+  margin-top: 18px;
+}
