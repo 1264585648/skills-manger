@@ -248,3 +248,15 @@ M3 仅实现 Claude Code 的只读发现：PATH 检测、默认 User root、显�
 浏览器 UI 冒烟通过：Playwright 打开 Vite 页面，进入“工作流”后 Bundle 列表、详情和新建编辑器均可访问；进入“环境更新”后在缺少桌面发现 root 时正确显示空状态，生成与确认按钮禁用。控制台仅有缺失 `favicon.ico` 的 404，与业务无关。该检查使用 mock/空 fallback，不替代 Tauri command E2E。
 
 M4 静态安全检查确认 Planner 模块没有生产文件写入、复制、重命名、删除或进程启动；测试代码仅在系统临时目录创建/清理 SQLite fixture。M4 没有 Apply Tauri command，UI 的 Agent 写入按钮保持 disabled。
+
+## 严格 CI 质量门禁
+
+Draft PR [#3](https://github.com/1264585648/skills-manger/pull/3) 的 Run `34246040109` 已通过：
+
+- `cargo fmt --check`；
+- `cargo clippy --all-targets --all-features -- -D warnings`；
+- Rust tests：23 passed，0 failed；
+- TypeScript typecheck 与 Vite production build；
+- Windows debug MSI/NSIS 构建及 artifact upload。
+
+因此 M3/M4 的 Rust 编译、格式、lint 和自动化回归已有远端权威证据；本机 `desktop:dev` 与真实窗口操作仍因本机无 Rust 工具链而保留为 BLOCKED。
