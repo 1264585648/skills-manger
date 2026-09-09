@@ -1,4 +1,7 @@
-use std::{path::Path, time::{SystemTime, UNIX_EPOCH}};
+use std::{
+    path::Path,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -98,40 +101,69 @@ pub fn generate_sync_plan(
         let deployment = safe_apply::deployment_for(db, &skill.id, &root.id)?;
         let (action, current_hash, reason) = if let Some(deployment) = deployment {
             if Path::new(&deployment.destination_path) != destination {
-                warnings.push(format!("owned destination changed for Skill '{}'", skill.name));
-                ("conflict", None, "Deployment destination does not match the registered root".to_string())
+                warnings.push(format!(
+                    "owned destination changed for Skill '{}'",
+                    skill.name
+                ));
+                (
+                    "conflict",
+                    None,
+                    "Deployment destination does not match the registered root".to_string(),
+                )
             } else if !destination.exists() {
-                ("add", None, "Owned Agent instance is missing and can be restored".to_string())
+                (
+                    "add",
+                    None,
+                    "Owned Agent instance is missing and can be restored".to_string(),
+                )
             } else {
                 match skills::inspect_skill(&destination) {
                     Ok(current) if current.content_hash != deployment.deployed_hash => (
-                        "conflict", Some(current.content_hash),
+                        "conflict",
+                        Some(current.content_hash),
                         "Target Drift differs from the last deployed hash".to_string(),
                     ),
                     Ok(current) if current.content_hash == skill.content_hash => (
-                        "unchanged", Some(current.content_hash),
+                        "unchanged",
+                        Some(current.content_hash),
                         "Owned Agent instance matches the Canonical Library hash".to_string(),
                     ),
                     Ok(current) => (
-                        "update", Some(current.content_hash),
+                        "update",
+                        Some(current.content_hash),
                         "Owned Agent instance is clean and the Library hash changed".to_string(),
                     ),
-                    Err(error) => ("conflict", None, format!("Owned Agent instance cannot be verified: {error}")),
+                    Err(error) => (
+                        "conflict",
+                        None,
+                        format!("Owned Agent instance cannot be verified: {error}"),
+                    ),
                 }
             }
         } else if !destination.exists() {
-            ("add", None, "Skill is absent from the selected Agent root".to_string())
+            (
+                "add",
+                None,
+                "Skill is absent from the selected Agent root".to_string(),
+            )
         } else {
             match skills::inspect_skill(&destination) {
                 Ok(current) if current.content_hash == skill.content_hash => (
-                    "unchanged", Some(current.content_hash),
+                    "unchanged",
+                    Some(current.content_hash),
                     "Unmanaged Agent instance already matches the Library hash".to_string(),
                 ),
                 Ok(current) => (
-                    "conflict", Some(current.content_hash),
-                    "Unmanaged Agent content differs; ownership must be resolved before any write".to_string(),
+                    "conflict",
+                    Some(current.content_hash),
+                    "Unmanaged Agent content differs; ownership must be resolved before any write"
+                        .to_string(),
                 ),
-                Err(error) => ("conflict", None, format!("Unmanaged destination cannot be verified: {error}")),
+                Err(error) => (
+                    "conflict",
+                    None,
+                    format!("Unmanaged destination cannot be verified: {error}"),
+                ),
             }
         };
         items.push(SyncPlanItemRecord {
@@ -148,7 +180,15 @@ pub fn generate_sync_plan(
 
     let signature = items
         .iter()
-        .map(|item| format!("{}:{}:{}:{}", item.skill_id, item.action, item.current_hash.as_deref().unwrap_or("-"), item.library_hash))
+        .map(|item| {
+            format!(
+                "{}:{}:{}:{}",
+                item.skill_id,
+                item.action,
+                item.current_hash.as_deref().unwrap_or("-"),
+                item.library_hash
+            )
+        })
         .collect::<Vec<_>>()
         .join("|");
     let plan = SyncPlanRecord {
@@ -164,8 +204,10 @@ pub fn generate_sync_plan(
 }
 
 fn unix_timestamp() -> Result<i64, AppError> {
-    Ok(SystemTime::now().duration_since(UNIX_EPOCH)
-        .map_err(|error| AppError::State(format!("system clock error: {error}")))?.as_secs() as i64)
+    Ok(SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| AppError::State(format!("system clock error: {error}")))?
+        .as_secs() as i64)
 }
 
 pub(crate) fn validate_bundle_draft(draft: &BundleDraft) -> Result<(), AppError> {

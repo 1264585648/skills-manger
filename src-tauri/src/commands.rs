@@ -7,8 +7,8 @@ use crate::{
     },
     bundle_planner::{self, BundleDraft, BundleRecord, SyncPlanRecord},
     error::CommandError,
-    skill_preview::{self, SkillImportPreview},
     safe_apply::{self, ApplyOperationRecord, DeploymentRecord},
+    skill_preview::{self, SkillImportPreview},
     skills::{self, ImportSkillResult, SkillRecord},
     AppState,
 };
@@ -273,15 +273,16 @@ pub fn apply_sync_plan(
     let _ = state.log.write(
         "info",
         "sync_plan_applied",
-        &format!("operation {} finished as {}", operation.id, operation.status),
+        &format!(
+            "operation {} finished as {}",
+            operation.id, operation.status
+        ),
     );
     Ok(operation)
 }
 
 #[tauri::command]
-pub fn list_deployments(
-    state: State<'_, AppState>,
-) -> Result<Vec<DeploymentRecord>, CommandError> {
+pub fn list_deployments(state: State<'_, AppState>) -> Result<Vec<DeploymentRecord>, CommandError> {
     safe_apply::list_deployments(&state.db).map_err(CommandError::from)
 }
 

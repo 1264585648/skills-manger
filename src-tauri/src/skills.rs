@@ -232,6 +232,14 @@ pub(crate) fn inspect_skill(root: &Path) -> Result<InspectedSkill, AppError> {
     })
 }
 
+pub(crate) fn inspect_managed_skill(
+    root: &Path,
+    expected_name: &str,
+) -> Result<(String, i64), AppError> {
+    let contents = inspect_skill_contents(root, expected_name)?;
+    Ok((contents.content_hash, contents.script_count))
+}
+
 fn inspect_skill_contents(root: &Path, expected_name: &str) -> Result<SkillContents, AppError> {
     let manifest_path = root.join("SKILL.md");
     let manifest_metadata = match fs::symlink_metadata(&manifest_path) {

@@ -147,7 +147,11 @@ pub fn apply_sync_plan(
             "sync plan contains unresolved conflicts".to_string(),
         ));
     }
-    if refreshed.items.iter().all(|item| item.action == "unchanged") {
+    if refreshed
+        .items
+        .iter()
+        .all(|item| item.action == "unchanged")
+    {
         return Err(AppError::State(
             "sync plan does not contain any changes".to_string(),
         ));
@@ -265,8 +269,8 @@ fn apply_item(
 
     let attempt = (|| {
         let source = validate_real_directory(Path::new(&skill.library_path), "Library Skill")?;
-        let inspected_source = skills::inspect_skill(&source)?;
-        if inspected_source.content_hash != expected_hash {
+        let (source_hash, _) = skills::inspect_managed_skill(&source, &skill.name)?;
+        if source_hash != expected_hash {
             return Err(AppError::State(format!(
                 "Library Skill changed during apply: {}",
                 skill.name
@@ -332,13 +336,27 @@ fn apply_item(
             upsert_deployment(db, skill, root_id, &destination, expected_hash, timestamp)
         });
         if let Err(error) = persist_result {
-            restore_current_item(db, root_id, &skill.id, &destination, &backup, &previous, timestamp);
+            restore_current_item(
+                db,
+                root_id,
+                &skill.id,
+                &destination,
+                &backup,
+                &previous,
+                timestamp,
+            );
             return Err(error);
         }
-        if let Err(error) =
-            set_operation_item_applied(db, operation_id, &skill.id, expected_hash)
-        {
-            restore_current_item(db, root_id, &skill.id, &destination, &backup, &previous, timestamp);
+        if let Err(error) = set_operation_item_applied(db, operation_id, &skill.id, expected_hash) {
+            restore_current_item(
+                db,
+                root_id,
+                &skill.id,
+                &destination,
+                &backup,
+                &previous,
+                timestamp,
+            );
             return Err(error);
         }
         applied.push(AppliedItem {
@@ -437,7 +455,10 @@ fn prepare_operations_root(path: &Path) -> Result<PathBuf, AppError> {
 
 fn validate_real_directory(path: &Path, label: &str) -> Result<PathBuf, AppError> {
     let metadata = fs::symlink_metadata(path).map_err(|error| {
-        AppError::State(format!("{label} cannot be inspected: {} ({error})", path.display()))
+        AppError::State(format!(
+            "{label} cannot be inspected: {} ({error})",
+            path.display()
+        ))
     })?;
     if metadata.file_type().is_symlink() || !metadata.is_dir() {
         return Err(AppError::State(format!("{label} must be a real directory")));
@@ -872,7 +893,8 @@ mod tests {
         );
         assert!(!marker.exists(), "scripts must never be executed");
 
-        let first_deployment = list_deployments(&database).expect("deployments should list")[0].clone();
+        let first_deployment =
+            list_deployments(&database).expect("deployments should list")[0].clone();
         write_skill(&source, "demo-skill", "version two", Some(&marker));
         let updated = import_skill_directory(&database, &library, &source)
             .expect("skill should update")
@@ -880,14 +902,17 @@ mod tests {
         let update_plan = generate_sync_plan(&database, &bundle_id, &discovery_root.id)
             .expect("update plan should generate");
         assert_eq!(update_plan.items[0].action, "update");
-        apply_sync_plan(&database, &operations, &update_plan.id, 20)
-            .expect("update should apply");
-        let second_deployment = list_deployments(&database).expect("deployments should list")[0].clone();
+        apply_sync_plan(&database, &operations, &update_plan.id, 20).expect("update should apply");
+        let second_deployment =
+            list_deployments(&database).expect("deployments should list")[0].clone();
         assert_eq!(first_deployment.id, second_deployment.id);
         assert_eq!(first_deployment.created_at, second_deployment.created_at);
         assert_eq!(second_deployment.updated_at, 20);
         assert_eq!(second_deployment.deployed_hash, updated.content_hash);
-        assert!(!marker.exists(), "scripts must never be executed during update");
+        assert!(
+            !marker.exists(),
+            "scripts must never be executed during update"
+        );
 
         drop(database);
         let _ = fs::remove_dir_all(root);
@@ -917,7 +942,9 @@ mod tests {
             .expect_err("stale plan must fail");
         assert!(error.to_string().contains("stale"));
         assert!(!target.join("demo-skill").exists());
-        assert!(list_deployments(&database).expect("deployments should list").is_empty());
+        assert!(list_deployments(&database)
+            .expect("deployments should list")
+            .is_empty());
 
         drop(database);
         let _ = fs::remove_dir_all(root);
@@ -945,14 +972,17 @@ mod tests {
         let bundle_id = create_bundle(&database, &imported);
         let plan = generate_sync_plan(&database, &bundle_id, &discovery_root.id)
             .expect("plan should generate");
-        fs::remove_dir_all(&imported[1].library_path).expect("second Library copy should disappear");
+        fs::remove_dir_all(&imported[1].library_path)
+            .expect("second Library copy should disappear");
 
         let error = apply_sync_plan(&database, &root.join("operations"), &plan.id, 10)
             .expect_err("apply should fail and roll back");
         assert!(error.to_string().contains("Library Skill"));
         assert!(!target.join("first-skill").exists());
         assert!(!target.join("second-skill").exists());
-        assert!(list_deployments(&database).expect("deployments should list").is_empty());
+        assert!(list_deployments(&database)
+            .expect("deployments should list")
+            .is_empty());
         let operations = list_apply_operations(&database).expect("operations should list");
         assert_eq!(operations.len(), 1);
         assert_eq!(operations[0].status, "rolled_back");
