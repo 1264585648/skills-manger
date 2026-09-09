@@ -5,19 +5,31 @@
 
 ---
 
+## 落地进度
+
+| 批次 | 内容 | commit |
+|---|---|---|
+| 第一批 | Settings 分区真实切换、Sources 去 mock、首页真实概览、Bundle→Sync 带参导航 | `5a06ff9` |
+| 第二批 | Sync 冲突处置面板（F1）、当前 Root 部署视图（F7） | `dc1e0a7` |
+
+已关闭：**F1 冲突无处置路径**、**F7 部署视图从未接线**、**F4/F5 中的 Settings 假分区与 Sources mock**、**首页硬编码**。
+仍开放：F13 Diff 预览、Adopt 接管、回滚入口（后端 `safe_apply::restore_operation` 已实现但未注册 command）、Settings 开关持久化、Library Skill 删除、多选 root 批量同步。
+
+---
+
 ## 一、功能缺口（按严重度）
 
 ### P0 — 断头路 & 假交互
 
 | # | 问题 | 证据 | 影响 |
 |---|---|---|---|
-| F1 | **Sync 冲突无处置路径**。`conflict` 只能"禁止应用"，样式里已有完整的 `.conflict-card` / `.resolution-options` 全套 CSS，但组件从未引用 | `src/styles.css:11` 定义了 `.conflict-card/.resolution/.active`；`grep conflict-card src/**/*.tsx` 零命中 | 用户看到 `Target Drift` 后没有任何可行动作，只能手工去磁盘删文件。这是产品闭环上最大的洞 |
+| ~~F1~~ ✅ | **Sync 冲突无处置路径** | 已于 `dc1e0a7` 修复：`src/components/ConflictResolver.tsx` 复用现成 `.conflict-card` 样式，按 reason 分四类并给出「从 Bundle 排除 / 打开目录 / 复制路径」三个处置 | 已关闭 |
 | F2 | **Settings 左侧 4 个分区切换是假交互**。`activeSection` 只改了 eyebrow 标题，四个区块（Sources / Git Source / 发现目录 / 更新策略）永远一起渲染 | `SettingsPage.tsx:14,80,82` | 分区导航看起来能用，实际是装饰 |
 | F3 | **Settings 两个开关不持久化、无副作用**。`scanOnStart` / `autoCheck` 只有 `useState`，既没落到 SQLite 也没影响启动流程 | `SettingsPage.tsx:15-16,98` | 用户以为设置了，重启即失效 |
 | F4 | **Settings 的 Sources 列表是 mock**，`getSources()` 直接返回 `mockSources`，"3 repositories / 4 roots" 是写死的数字 | `workspaceService.ts:359` | 桌面上显示假数据，严重损害可信度 |
 | F5 | **首页完全硬编码**，`demoEnvironment` 写死 "12 Skills / 2026-09-06"，标题还是 `<h1>我的 AI 环境</h1>` 里套 `<h2>` | `HomePage.tsx:3-27` | 作为默认落地页毫无价值；真实环境概览散落在其它页 |
 | F6 | **Skills 分组侧栏永远只有"全部"**。`groups` 字段在 `mapLibrarySkill` 与 `mapSkillInstance` 里恒为 `[]`，后端也没有 group 表 | `workspaceService.ts:73`、`discoveryMappers.ts:47` | 一整个左侧栏 + V1 原则第 4 条（"Group 只分类"）是空的 |
-| F7 | **`list_deployments` 已实现但 UI 从未调用** | `commands.rs:309`、`workspaceService.ts:247` | 无法回答"哪个 root 上现在部署了什么、哪个版本"，只能靠 Sync 重新生成计划来猜 |
+| ~~F7~~ ✅ | **`list_deployments` 已实现但 UI 从未调用** | 已于 `dc1e0a7` 修复：Sync 页 inspector 新增"当前 Root 已部署"，按所选 Root 过滤并按更新时间排序 | 已关闭 |
 | F8 | **Bundles 页 "前往 Sync 预览" 永久 disabled**，Inspector 里"目标"硬编码 `Claude Code` | `BundlesPage.tsx:105` | 唯一能把 Bundle → Sync 串起来的入口是断的 |
 
 ### P1 — 能力缺口
