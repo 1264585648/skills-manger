@@ -12,7 +12,7 @@ export interface Skill {
   contentHash?: string;
   version: string;
   status: SkillStatus;
-  groups: string[];
+  tags: string[];
   bundles: string[];
   targets: string[];
   lastUpdated: string;
@@ -23,6 +23,13 @@ export interface Skill {
   trackedSourceId?: string;
   updateStatus?: string;
   canPromote?: boolean;
+}
+
+export interface SkillTag {
+  id: string;
+  name: string;
+  isSystem: boolean;
+  skillCount: number;
 }
 
 export interface Bundle {

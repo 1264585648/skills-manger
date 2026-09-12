@@ -1,279 +1,90 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { confirm } from "@tauri-apps/plugin-dialog";
+import { confirm as tauriConfirm } from "@tauri-apps/plugin-dialog";
+import { Sparkles, Tags, Trash2, Pencil, Undo2 } from "lucide-react";
+import { Drawer } from "../components/agents/Drawer";
 import { ImportWizard } from "../components/ImportWizard";
 import { Button, EmptyState, PageHeader, SearchField, StatusPill } from "../components/ui";
 import { workspaceService } from "../services/workspaceService";
-import type { Skill, SkillStatus } from "../types/domain";
+import { filterSkills, isLibrarySkill, readViewPreferences, suggestTagNames, type SkillsViewMode, type SkillsViewPreferences } from "../services/skillTagState";
+import type { Skill, SkillStatus, SkillTag } from "../types/domain";
 import type { SkillImportPlan } from "../types/import";
+import "../agents.css";
+import "../skillTags.css";
 
 const statusMeta: Record<SkillStatus, { label: string; tone: "green" | "amber" | "red" | "blue" | "gray" }> = {
-  clean: { label: "Clean", tone: "green" },
-  update: { label: "Update", tone: "amber" },
-  upstream_update: { label: "Upstream Update", tone: "amber" },
-  local_modified: { label: "Local Modified", tone: "red" },
-  target_drift: { label: "Target Drift", tone: "red" },
-  unmanaged: { label: "Unmanaged", tone: "gray" },
-  conflict: { label: "Conflict", tone: "red" },
-  missing: { label: "Missing", tone: "red" },
+  clean: { label: "Clean", tone: "green" }, update: { label: "Update", tone: "amber" }, upstream_update: { label: "Upstream Update", tone: "amber" },
+  local_modified: { label: "Local Modified", tone: "red" }, target_drift: { label: "Target Drift", tone: "red" }, unmanaged: { label: "Unmanaged", tone: "gray" }, conflict: { label: "Conflict", tone: "red" }, missing: { label: "Missing", tone: "red" },
 };
-
+const quickTagNames = ["编码", "UI", "办公", "Review"];
+const sortTags = (values: SkillTag[]): SkillTag[] => [...values].sort((a, b) => {
+  const aIndex = quickTagNames.indexOf(a.name);
+  const bIndex = quickTagNames.indexOf(b.name);
+  if (aIndex >= 0 && bIndex >= 0) return aIndex - bIndex;
+  if (aIndex >= 0) return -1;
+  if (bIndex >= 0) return 1;
+  return a.name.localeCompare(b.name, "zh-CN");
+});
 type Notice = { tone: "success" | "error"; text: string } | null;
+type Assignment = { skillId: string; tagNames: string[] };
 
-export function SkillsPage() {
-  const [skills, setSkills] = useState<Skill[]>([]);
-  const [query, setQuery] = useState("");
-  const [group, setGroup] = useState("全部");
-  const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [preparingImport, setPreparingImport] = useState(false);
-  const [executingImport, setExecutingImport] = useState(false);
-  const [importPlan, setImportPlan] = useState<SkillImportPlan | null>(null);
-  const [notice, setNotice] = useState<Notice>(null);
-  const [sourceBusy, setSourceBusy] = useState(false);
+function SkillRow({ skill, mode, selected, selectable, tagList, onSelect, onOpen, onQuickTag }: { skill: Skill; mode: SkillsViewMode; selected: boolean; selectable: boolean; tagList: SkillTag[]; onSelect: () => void; onOpen: () => void; onQuickTag: (name: string) => void }) {
+  const meta = statusMeta[skill.status];
+  return <div className={selected ? "skill-row selected" : "skill-row"} onClick={onOpen}>
+    <span className="skill-select"><input type="checkbox" checked={selected} disabled={!selectable} aria-label={`选择 ${skill.name}`} onChange={onSelect} onClick={(event) => event.stopPropagation()} /></span>
+    <span className="skill-name-cell"><i className="skill-glyph">S</i><span><strong>{skill.name}</strong><small>{skill.description}</small></span></span>
+    <span className="skill-tags-cell">{skill.tags.length ? skill.tags.map((tag) => <span className="tag-chip" key={tag}>{tag}</span>) : <span className="muted-cell">未分组</span>}</span>
+    <span className="muted-cell" title={skill.sourcePath}>{skill.source}</span><span><StatusPill tone={meta.tone}>{meta.label}</StatusPill></span><span className="mono-cell">{skill.version}</span>
+    {mode === "organize" ? <span className="quick-tag-actions">{quickTagNames.map((name) => tagList.find((tag) => tag.name === name) ? <button key={name} type="button" onClick={(event) => { event.stopPropagation(); onQuickTag(name); }}>{name}</button> : null)}</span> : null}
+  </div>;
+}
 
-  const loadSkills = useCallback(async () => {
-    setNotice(null);
-    setLoading(true);
-    try {
-      const items = await workspaceService.getSkills();
-      setSkills(items);
-      setSelectedId((current) =>
-        current && items.some((item) => item.id === current)
-          ? current
-          : items[0]?.id ?? null,
-      );
-    } finally {
-      setLoading(false);
-    }
-  }, []);
+function SkillDetail({ skill, tags, busy, onClose, onToggleTag, onClear, onAddToAgent, onCheckSource, onPromoteSource }: { skill: Skill; tags: SkillTag[]; busy: boolean; onClose: () => void; onToggleTag: (name: string) => void; onClear: () => void; onAddToAgent?: (ids: string[]) => void; onCheckSource: (sourceId: string) => void; onPromoteSource: (sourceId: string) => void }) {
+  const discovery = !isLibrarySkill(skill);
+  return <Drawer title={skill.name} subtitle={skill.description} onClose={onClose}>
+    <div className="inspector-section"><span className="section-label">{discovery ? "Discovery" : "Library"}</span><dl className="detail-list"><div><dt>来源</dt><dd title={skill.sourcePath}>{skill.source}</dd></div><div><dt>版本</dt><dd>{skill.version}</dd></div><div><dt>标签</dt><dd className="detail-tags">{skill.tags.length ? skill.tags.map((tag) => <span className="tag-chip" key={tag}>{tag}</span>) : "未分组"}</dd></div><div><dt>Content Hash</dt><dd className="hash-value" title={skill.contentHash}>{skill.contentHash?.slice(0, 12) ?? "—"}</dd></div><div><dt>License</dt><dd>{skill.license ?? "—"}</dd></div><div><dt>Compatibility</dt><dd>{skill.compatibility ?? "—"}</dd></div><div><dt>安全</dt><dd>{skill.security}</dd></div><div><dt>更新</dt><dd>{skill.lastUpdated}</dd></div></dl></div>
+    {!discovery ? <div className="detail-tag-editor"><span className="section-label">编辑标签</span><div className="tag-choice-list">{tags.map((tag) => <button className={skill.tags.includes(tag.name) ? "tag-choice active" : "tag-choice"} key={tag.id} type="button" onClick={() => onToggleTag(tag.name)}>{skill.tags.includes(tag.name) ? "✓ " : ""}{tag.name}</button>)}</div><Button onClick={onClear}>清除标签</Button></div> : <p className="readonly-discovery-note">只读发现，尚未纳入 Library；不会写入或执行 Agent 目录内容。</p>}
+    <div className="inspector-actions">{!discovery && onAddToAgent ? <Button variant="primary" onClick={() => onAddToAgent([skill.id])}>添加到 Agent</Button> : null}{skill.trackedSourceId ? <Button disabled={busy} onClick={() => onCheckSource(skill.trackedSourceId!)}>{busy ? "检查中…" : "检查 Git 更新"}</Button> : null}{skill.trackedSourceId && skill.canPromote ? <Button variant="primary" disabled={busy} onClick={() => onPromoteSource(skill.trackedSourceId!)}>提升 Upstream</Button> : null}</div>
+  </Drawer>;
+}
 
-  useEffect(() => {
-    void loadSkills();
-  }, [loadSkills]);
+export function SkillsPage({ onAddToAgent }: { onAddToAgent?: (ids: string[]) => void }) {
+  const stored = useMemo(() => readViewPreferences(localStorage.getItem("skills.viewPreferences")), []);
+  const [skills, setSkills] = useState<Skill[]>([]); const [tags, setTags] = useState<SkillTag[]>([]); const [preferences, setPreferences] = useState<SkillsViewPreferences>(stored ?? { mode: "browse", tagId: "all", query: "", page: 1 });
+  const [selectedId, setSelectedId] = useState<string | null>(null); const [selectedIds, setSelectedIds] = useState<string[]>([]); const [detailOpen, setDetailOpen] = useState(false); const [loading, setLoading] = useState(true); const [notice, setNotice] = useState<Notice>(null); const [sourceBusy, setSourceBusy] = useState(false); const [undoBatch, setUndoBatch] = useState<Assignment[] | null>(null); const [tagEditorOpen, setTagEditorOpen] = useState(false); const [tagName, setTagName] = useState(""); const [editingTag, setEditingTag] = useState<SkillTag | null>(null); const [suggestionsOpen, setSuggestionsOpen] = useState(false); const [suggestionIds, setSuggestionIds] = useState<Record<string, string[]>>({}); const [preparingImport, setPreparingImport] = useState(false); const [executingImport, setExecutingImport] = useState(false); const [importPlan, setImportPlan] = useState<SkillImportPlan | null>(null);
+  const { mode, tagId: activeTagId, query, page } = preferences;
 
-  const handlePrepareImport = async () => {
-    setNotice(null);
-    setPreparingImport(true);
-    try {
-      const plan = await workspaceService.previewSkillFromPicker();
-      if (plan) setImportPlan(plan);
-    } catch (error) {
-      setNotice({
-        tone: "error",
-        text: error instanceof Error ? error.message : "扫描 Skill 失败",
-      });
-    } finally {
-      setPreparingImport(false);
-    }
-  };
+  const loadData = useCallback(async () => { setLoading(true); try { const [items, nextTags] = await Promise.all([workspaceService.getSkills(), workspaceService.getTags()]); setSkills(items); setTags(sortTags(nextTags)); setSelectedId((current) => current && items.some((item) => item.id === current) ? current : items[0]?.id ?? null); if (!stored && items.some((item) => isLibrarySkill(item) && item.tags.length === 0)) setPreferences((current) => ({ ...current, mode: "organize", tagId: "unassigned", page: 1 })); } catch (error) { setNotice({ tone: "error", text: error instanceof Error ? error.message : "读取 Skills 失败" }); } finally { setLoading(false); } }, [stored]);
+  useEffect(() => { void loadData(); }, [loadData]); useEffect(() => { localStorage.setItem("skills.viewPreferences", JSON.stringify(preferences)); }, [preferences]);
+  const librarySkills = useMemo(() => skills.filter(isLibrarySkill), [skills]); const ungroupedCount = librarySkills.filter((skill) => skill.tags.length === 0).length; const selected = skills.find((skill) => skill.id === selectedId) ?? null; const tagByName = useMemo(() => new Map(tags.map((tag) => [tag.name, tag])), [tags]);
+  const filtered = useMemo(() => filterSkills(skills, tags, preferences), [preferences, skills, tags]); const pageCount = Math.max(1, Math.ceil(filtered.length / 50)); const safePage = Math.min(page, pageCount); const pageItems = filtered.slice((safePage - 1) * 50, safePage * 50); const selectableItems = pageItems.filter(isLibrarySkill); const allSelected = selectableItems.length > 0 && selectableItems.every((skill) => selectedIds.includes(skill.id));
+  useEffect(() => { if (page !== safePage) setPreferences((current) => ({ ...current, page: safePage })); }, [page, safePage]);
+  const changePreferences = (patch: Partial<SkillsViewPreferences>) => { setPreferences((current) => ({ ...current, ...patch, page: patch.page ?? 1 })); setSelectedIds([]); };
+  const assignmentsFromNames = (items: Assignment[]) => items.map((item) => ({ skillId: item.skillId, tagIds: item.tagNames.map((name) => tagByName.get(name)?.id).filter((id): id is string => Boolean(id)) }));
+  const updateAssignments = async (items: Assignment[], text: string, recordUndo = true) => { const previous = items.map(({ skillId }) => ({ skillId, tagNames: skills.find((skill) => skill.id === skillId)?.tags ?? [] })); try { await workspaceService.updateSkillTagAssignments(assignmentsFromNames(items)); if (recordUndo) setUndoBatch(previous); await loadData(); setSelectedIds([]); setNotice({ tone: "success", text }); } catch (error) { setNotice({ tone: "error", text: error instanceof Error ? error.message : "标签保存失败" }); } };
+  const toggleTag = (skillId: string, name: string) => { const skill = skills.find((item) => item.id === skillId); if (!skill || !isLibrarySkill(skill)) return; const next = skill.tags.includes(name) ? skill.tags.filter((tag) => tag !== name) : [...skill.tags, name]; void updateAssignments([{ skillId, tagNames: next }], `已更新“${skill.name}”的标签`); };
+  const addTag = (skillIds: string[], name: string, replace = false) => void updateAssignments(skillIds.map((skillId) => { const skill = skills.find((item) => item.id === skillId); return { skillId, tagNames: replace ? [name] : Array.from(new Set([...(skill?.tags ?? []), name])) }; }), `已为 ${skillIds.length} 个 Skill 添加“${name}”标签`);
+  const undo = async () => { if (!undoBatch) return; const batch = undoBatch; setUndoBatch(null); await updateAssignments(batch, "已撤销上次标签调整", false); };
+  useEffect(() => { const handler = (event: KeyboardEvent) => { if (event.ctrlKey || event.metaKey || event.altKey || event.isComposing) return; const target = event.target as HTMLElement | null; if (target && ["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName)) return; if (event.key.toLowerCase() === "u") { event.preventDefault(); void undo(); return; } const name = quickTagNames[Number(event.key) - 1]; if (!name || mode !== "organize") return; const skillId = selectedIds[0] ?? pageItems[0]?.id; if (skillId) { event.preventDefault(); addTag([skillId], name, true); } }; window.addEventListener("keydown", handler); return () => window.removeEventListener("keydown", handler); }, [addTag, mode, pageItems, selectedIds, undo]);
+  const openSuggestions = () => { const next: Record<string, string[]> = {}; pageItems.forEach((skill) => { next[skill.id] = suggestTagNames(skill, tags); }); setSuggestionIds(next); setSuggestionsOpen(true); };
+  const applySuggestions = () => { const items = pageItems.map((skill) => ({ skillId: skill.id, tagNames: Array.from(new Set([...skill.tags, ...(suggestionIds[skill.id] ?? [])])) })).filter((item) => item.tagNames.length); void updateAssignments(items, `已应用 ${items.length} 条标签建议`); setSuggestionsOpen(false); };
+  const handlePrepareImport = async () => { setPreparingImport(true); try { const plan = await workspaceService.previewSkillFromPicker(); if (plan) setImportPlan(plan); } catch (error) { setNotice({ tone: "error", text: error instanceof Error ? error.message : "扫描 Skill 失败" }); } finally { setPreparingImport(false); } };
+  const handleConfirmImport = async () => { if (!importPlan) return; if (!importPlan.summary.add && !importPlan.summary.update) { setImportPlan(null); return; } setExecutingImport(true); try { const results = await workspaceService.executeImportPlan(importPlan); await loadData(); setImportPlan(null); if (results.at(-1)) setSelectedId(results.at(-1)!.skill.id); setNotice({ tone: "success", text: `导入完成：新增 ${importPlan.summary.add}，更新 ${importPlan.summary.update}。` }); } catch (error) { setNotice({ tone: "error", text: error instanceof Error ? error.message : "导入失败" }); } finally { setExecutingImport(false); } };
+  const ask = async (message: string) => typeof window !== "undefined" && "__TAURI_INTERNALS__" in window ? tauriConfirm(message) : window.confirm(message);
+  const saveTag = async (event: React.FormEvent) => { event.preventDefault(); if (!tagName.trim()) return; try { await workspaceService.upsertTag(tagName, editingTag?.id); setTagEditorOpen(false); setTagName(""); setEditingTag(null); await loadData(); } catch (error) { setNotice({ tone: "error", text: error instanceof Error ? error.message : "标签保存失败" }); } };
+  const removeTag = async (tag: SkillTag) => { if (tag.isSystem || !(await ask(`删除标签“${tag.name}”？Skill 不会被删除。`))) return; try { await workspaceService.deleteTag(tag.id); if (activeTagId === tag.id) changePreferences({ tagId: "all" }); setUndoBatch(null); await loadData(); } catch (error) { setNotice({ tone: "error", text: error instanceof Error ? error.message : "标签删除失败" }); } };
+  const checkSource = async (sourceId: string) => { setSourceBusy(true); try { const result = await workspaceService.checkGitSource(sourceId); await loadData(); setNotice({ tone: "success", text: `检查完成：${result.skillName} · ${result.status}` }); } catch (error) { setNotice({ tone: "error", text: error instanceof Error ? error.message : "检查 Git 更新失败" }); } finally { setSourceBusy(false); } };
+  const promoteSource = async (sourceId: string) => { if (!(await ask("将已检查的 upstream 版本提升为 Canonical Library，是否继续？"))) return; setSourceBusy(true); try { const result = await workspaceService.promoteGitSource(sourceId); await loadData(); setNotice({ tone: "success", text: `${result.skill.name} 已更新到 upstream` }); } catch (error) { setNotice({ tone: "error", text: error instanceof Error ? error.message : "提升 upstream 失败" }); } finally { setSourceBusy(false); } };
 
-  const handleConfirmImport = async () => {
-    if (!importPlan) return;
-    const mutationCount = importPlan.summary.add + importPlan.summary.update;
-    if (mutationCount === 0) {
-      setImportPlan(null);
-      setNotice({ tone: "success", text: "来源内容与 Library 一致，无需更新。" });
-      return;
-    }
-
-    setExecutingImport(true);
-    try {
-      const results = await workspaceService.executeImportPlan(importPlan);
-      await loadSkills();
-      const last = results.at(-1);
-      if (last) setSelectedId(last.skill.id);
-      setImportPlan(null);
-      setNotice({
-        tone: "success",
-        text: `导入完成：新增 ${importPlan.summary.add}，更新 ${importPlan.summary.update}。`,
-      });
-    } catch (error) {
-      setNotice({
-        tone: "error",
-        text: error instanceof Error ? error.message : "导入失败",
-      });
-    } finally {
-      setExecutingImport(false);
-    }
-  };
-
-  const handleCheckSource = async (sourceId: string): Promise<void> => {
-    setSourceBusy(true);
-    setNotice(null);
-    try {
-      const update = await workspaceService.checkGitSource(sourceId);
-      await loadSkills();
-      setNotice({ tone: "success", text: `检查完成：${update.skillName} · ${update.status}` });
-    } catch (error) {
-      setNotice({ tone: "error", text: error instanceof Error ? error.message : "检查 Git Source 失败" });
-    } finally {
-      setSourceBusy(false);
-    }
-  };
-
-  const handlePromoteSource = async (sourceId: string): Promise<void> => {
-    if (!(await confirm("将已检查的 upstream 版本提升为 Canonical Library。Agent 目标不会在此步骤被写入，是否继续？"))) return;
-    setSourceBusy(true);
-    setNotice(null);
-    try {
-      const result = await workspaceService.promoteGitSource(sourceId);
-      await loadSkills();
-      setNotice({ tone: "success", text: `${result.skill.name} 已更新到 upstream；请在 Sync 中审阅目标部署计划。` });
-    } catch (error) {
-      setNotice({ tone: "error", text: error instanceof Error ? error.message : "提升 upstream 失败" });
-    } finally {
-      setSourceBusy(false);
-    }
-  };
-
-  const groups = useMemo(
-    () => ["全部", ...Array.from(new Set(skills.flatMap((item) => item.groups)))],
-    [skills],
-  );
-
-  const filtered = useMemo(() => {
-    const normalized = query.trim().toLowerCase();
-    return skills.filter((skill) => {
-      const matchesGroup = group === "全部" || skill.groups.includes(group);
-      const matchesQuery =
-        !normalized ||
-        `${skill.name} ${skill.description} ${skill.source} ${skill.sourcePath ?? ""}`
-          .toLowerCase()
-          .includes(normalized);
-      return matchesGroup && matchesQuery;
-    });
-  }, [group, query, skills]);
-
-  const selected = skills.find((skill) => skill.id === selectedId) ?? filtered[0];
-  const libraryCount = skills.filter((skill) => !skill.id.startsWith("instance:")).length;
-  const unmanagedCount = skills.filter((skill) => skill.status === "unmanaged").length;
-  const attentionCount = skills.filter((skill) => skill.status !== "clean").length;
-  const selectedIsDiscovery = selected?.id.startsWith("instance:") ?? false;
-
-  return <section className="page">
-    <PageHeader
-      title="Skills"
-      subtitle="统一管理本地 Skills 资产、来源与状态。"
-      actions={
-        <Button
-          variant="primary"
-          disabled={preparingImport || executingImport}
-          onClick={() => void handlePrepareImport()}
-        >
-          {preparingImport ? "扫描中…" : "＋ 导入 Skill"}
-        </Button>
-      }
-    />
-
-    {notice ? (
-      <div className={`inline-notice notice-${notice.tone}`}>{notice.text}</div>
-    ) : null}
-
-    <div className="summary-row summary-three">
-      <article><span>Library Skills</span><strong>{libraryCount}</strong></article>
-      <article><span>只读发现</span><strong>{unmanagedCount}</strong></article>
-      <article><span>需要关注</span><strong>{attentionCount}</strong></article>
+  return <section className="page skills-page"><PageHeader title="Skills" subtitle="按标签定位、整理和维护本地 Skills 资产。" actions={<><Button variant={mode === "organize" ? "primary" : "secondary"} onClick={() => changePreferences({ mode: mode === "organize" ? "browse" : "organize", tagId: mode === "organize" ? "all" : "unassigned" })}>{mode === "organize" ? "返回资产浏览" : `快速整理${ungroupedCount ? ` · ${ungroupedCount}` : ""}`}</Button><Button variant="primary" disabled={preparingImport || executingImport} onClick={() => void handlePrepareImport()}>+ 导入 Skill</Button></>} />
+    {notice ? <div className={`inline-notice notice-${notice.tone}`} role="status">{notice.text}</div> : null}
+    <div className="summary-row summary-three"><article><span>Library Skills</span><strong>{librarySkills.length}</strong></article><article><span>未分组</span><strong>{ungroupedCount}</strong></article><article><span>需要关注</span><strong>{skills.filter((skill) => skill.status !== "clean").length}</strong></article></div>
+    <div className="workbench skills-workbench skills-no-inspector"><aside className="workbench-nav panel-surface tag-nav"><div className="panel-title"><Tags size={12} /> 标签</div><button className={activeTagId === "all" && mode === "browse" ? "subnav-item active" : "subnav-item"} type="button" onClick={() => changePreferences({ mode: "browse", tagId: "all" })}><span>全部</span><small>{skills.length}</small></button><button className={activeTagId === "unassigned" ? "subnav-item active" : "subnav-item"} type="button" onClick={() => changePreferences({ mode: "organize", tagId: "unassigned" })}><span>未分组</span><small>{ungroupedCount}</small></button>{tags.map((tag) => <div className="tag-nav-row" key={tag.id}><button className={activeTagId === tag.id ? "subnav-item active" : "subnav-item"} type="button" onClick={() => changePreferences({ mode: "browse", tagId: tag.id })}><span>{tag.name}</span><small>{tag.skillCount}</small></button>{!tag.isSystem ? <span className="tag-nav-actions"><button type="button" aria-label={`编辑 ${tag.name}`} onClick={() => { setEditingTag(tag); setTagName(tag.name); setTagEditorOpen(true); }}><Pencil size={11} /></button><button type="button" aria-label={`删除 ${tag.name}`} onClick={() => void removeTag(tag)}><Trash2 size={11} /></button></span> : null}</div>)}<Button className="tag-create-button" onClick={() => { setEditingTag(null); setTagName(""); setTagEditorOpen(true); }}>+ 新建标签</Button></aside>
+      <section className="panel-surface skill-list-panel"><div className="panel-toolbar"><SearchField value={query} onChange={(value) => changePreferences({ query: value })} placeholder="搜索 Skill、来源…" />{mode === "organize" ? <Button onClick={openSuggestions} disabled={!pageItems.length}><Sparkles size={13} /> 生成建议</Button> : null}<Button variant="ghost" onClick={() => void loadData()}>刷新</Button></div>{selectedIds.length ? <div className="bulk-toolbar"><strong>已选择 {selectedIds.length} 项</strong>{tags.map((tag) => <Button key={tag.id} onClick={() => addTag(selectedIds, tag.name)}>{tag.name}</Button>)}<Button onClick={() => void updateAssignments(selectedIds.map((skillId) => ({ skillId, tagNames: [] })), "已清除所选 Skill 的标签")}>清除标签</Button></div> : null}<div className="skill-list-caption"><span>{mode === "organize" ? `待整理 ${filtered.length} 项` : `显示 ${filtered.length} 项`}</span><label><input type="checkbox" checked={allSelected} onChange={() => setSelectedIds(allSelected ? [] : selectableItems.map((skill) => skill.id))} /> 全选</label></div><div className="skill-table-head"><span></span><span>Skill</span><span>标签</span><span>来源</span><span>状态</span><span>版本</span></div><div className="skill-list">{loading ? <EmptyState title="正在读取 Library" body="从本地 SQLite 加载已托管 Skill。" /> : pageItems.length === 0 ? <EmptyState title={mode === "organize" ? "没有待整理 Skill" : "没有匹配的 Skill"} body={mode === "organize" ? "所有 Library Skill 都已完成标签整理。" : "调整搜索词或标签后再试。"} /> : pageItems.map((skill) => <SkillRow key={skill.id} skill={skill} mode={mode} selected={selectedIds.includes(skill.id)} selectable={isLibrarySkill(skill)} tagList={tags} onSelect={() => isLibrarySkill(skill) && setSelectedIds((current) => current.includes(skill.id) ? current.filter((id) => id !== skill.id) : [...current, skill.id])} onOpen={() => { setSelectedId(skill.id); setDetailOpen(true); }} onQuickTag={(name) => addTag([skill.id], name, true)} />)}</div><div className="pagination"><span>第 {safePage} / {pageCount} 页</span><Button disabled={safePage <= 1} onClick={() => changePreferences({ page: safePage - 1 })}>上一页</Button><Button disabled={safePage >= pageCount} onClick={() => changePreferences({ page: safePage + 1 })}>下一页</Button></div></section>
     </div>
-
-    <div className="workbench skills-workbench">
-      <aside className="workbench-nav panel-surface">
-        <div className="panel-title">分组</div>
-        {groups.slice(0, 6).map((item) => (
-          <button
-            className={group === item ? "subnav-item active" : "subnav-item"}
-            key={item}
-            onClick={() => setGroup(item)}
-            type="button"
-          >
-            <span>{item}</span>
-            <small>
-              {item === "全部"
-                ? skills.length
-                : skills.filter((skill) => skill.groups.includes(item)).length}
-            </small>
-          </button>
-        ))}
-      </aside>
-
-      <section className="panel-surface skill-list-panel">
-        <div className="panel-toolbar">
-          <SearchField value={query} onChange={setQuery} placeholder="搜索 Skill、来源…" />
-          <Button variant="ghost" onClick={() => void loadSkills()}>刷新</Button>
-        </div>
-
-        <div className="skill-table-head">
-          <span>Skill</span><span>来源</span><span>状态</span><span>版本</span>
-        </div>
-
-        <div className="skill-list">
-          {loading ? (
-            <EmptyState title="正在读取 Library" body="从本地 SQLite 加载已托管 Skill。" />
-          ) : filtered.length === 0 ? (
-            <EmptyState
-              title={skills.length === 0 ? "还没有 Skill" : "没有匹配的 Skill"}
-              body={
-                skills.length === 0
-                  ? "导入到 Library，或在 Settings 中添加 Claude Code 发现目录。"
-                  : "调整搜索词或分组后再试。"
-              }
-            />
-          ) : filtered.map((skill) => {
-            const meta = statusMeta[skill.status];
-            return (
-              <button
-                className={selected?.id === skill.id ? "skill-row selected" : "skill-row"}
-                key={skill.id}
-                onClick={() => setSelectedId(skill.id)}
-                type="button"
-              >
-                <span className="skill-name-cell">
-                  <i className="skill-glyph">✦</i>
-                  <span><strong>{skill.name}</strong><small>{skill.description}</small></span>
-                </span>
-                <span className="muted-cell" title={skill.sourcePath}>{skill.source}</span>
-                <span><StatusPill tone={meta.tone}>{meta.label}</StatusPill></span>
-                <span className="mono-cell">{skill.version}</span>
-              </button>
-            );
-          })}
-        </div>
-      </section>
-
-      <aside className="panel-surface inspector">
-        {selected ? <>
-          <div className="inspector-title">
-            <i className="large-skill-glyph">✦</i>
-            <div><h2>{selected.name}</h2><p>{selected.description}</p></div>
-          </div>
-          <div className="inspector-section">
-            <span className="section-label">{selectedIsDiscovery ? "Discovery" : "Library"}</span>
-            <dl className="detail-list">
-              <div><dt>来源</dt><dd title={selected.sourcePath}>{selected.source}</dd></div>
-              <div><dt>版本</dt><dd>{selected.version}</dd></div>
-              <div><dt>Content Hash</dt><dd className="hash-value" title={selected.contentHash}>{selected.contentHash?.slice(0, 12) ?? "—"}</dd></div>
-              <div><dt>安全</dt><dd>{selected.security}</dd></div>
-              <div><dt>License</dt><dd>{selected.license ?? "—"}</dd></div>
-              <div><dt>更新</dt><dd>{selected.lastUpdated}</dd></div>
-              {selected.updateStatus ? <div><dt>三线状态</dt><dd>{selected.updateStatus}</dd></div> : null}
-            </dl>
-          </div>
-          {selectedIsDiscovery ? <p className="readonly-discovery-note">只读发现，尚未纳入 Library；不会写入或执行 Agent 目录内容。</p> : null}
-          <div className="inspector-actions">
-            {selected.trackedSourceId ? <Button disabled={sourceBusy} onClick={() => void handleCheckSource(selected.trackedSourceId!)}>{sourceBusy ? "检查中…" : "检查 Git 更新"}</Button> : null}
-            {selected.trackedSourceId && selected.canPromote ? <Button variant="primary" disabled={sourceBusy} onClick={() => void handlePromoteSource(selected.trackedSourceId!)}>提升 Upstream</Button> : null}
-            <Button onClick={() => void loadSkills()}>重新读取</Button>
-          </div>
-        </> : null}
-      </aside>
-    </div>
-
-    {importPlan ? (
-      <ImportWizard
-        busy={executingImport}
-        plan={importPlan}
-        onCancel={() => setImportPlan(null)}
-        onConfirm={() => void handleConfirmImport()}
-      />
-    ) : null}
+    {detailOpen && selected ? <SkillDetail skill={selected} tags={tags} busy={sourceBusy} onClose={() => setDetailOpen(false)} onToggleTag={(name) => toggleTag(selected.id, name)} onClear={() => void updateAssignments([{ skillId: selected.id, tagNames: [] }], "已清除标签")} onAddToAgent={onAddToAgent} onCheckSource={(sourceId) => void checkSource(sourceId)} onPromoteSource={(sourceId) => void promoteSource(sourceId)} /> : null}
+    {undoBatch ? <div className="undo-bar"><Undo2 size={14} /> 已完成标签调整 <button type="button" onClick={() => void undo()}>撤销</button></div> : null}
+    {tagEditorOpen ? <Drawer title={editingTag ? "编辑标签" : "新建标签"} onClose={() => setTagEditorOpen(false)}><form className="tag-editor-form" onSubmit={(event) => void saveTag(event)}><label>标签名称<input autoFocus value={tagName} maxLength={32} onChange={(event) => setTagName(event.target.value)} /></label><Button variant="primary" type="submit">保存</Button></form></Drawer> : null}
+    {suggestionsOpen ? <Drawer title="标签建议" subtitle="确认后才会写入标签，已有标签会保留。" onClose={() => setSuggestionsOpen(false)} footer={<><Button onClick={() => setSuggestionsOpen(false)}>取消</Button><Button variant="primary" onClick={applySuggestions}>确认应用</Button></>}><div className="suggestion-list">{pageItems.map((skill) => <div className="suggestion-row" key={skill.id}><strong>{skill.name}</strong><div className="tag-choice-list">{tags.map((tag) => <button className={(suggestionIds[skill.id] ?? []).includes(tag.name) ? "tag-choice active" : "tag-choice"} key={tag.id} type="button" onClick={() => setSuggestionIds((current) => ({ ...current, [skill.id]: (current[skill.id] ?? []).includes(tag.name) ? (current[skill.id] ?? []).filter((name) => name !== tag.name) : [...(current[skill.id] ?? []), tag.name] }))}>{tag.name}</button>)}</div></div>)}</div></Drawer> : null}
+    {importPlan ? <ImportWizard busy={executingImport} plan={importPlan} onCancel={() => setImportPlan(null)} onConfirm={() => void handleConfirmImport()} /> : null}
   </section>;
 }

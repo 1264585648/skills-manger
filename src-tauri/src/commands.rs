@@ -69,6 +69,53 @@ pub fn list_library_skills(state: State<'_, AppState>) -> Result<Vec<SkillRecord
 }
 
 #[tauri::command]
+pub fn list_tags(state: State<'_, AppState>) -> Result<Vec<crate::db::TagRecord>, CommandError> {
+    state.db.list_tags().map_err(CommandError::from)
+}
+
+#[tauri::command]
+pub fn upsert_tag(
+    state: State<'_, AppState>,
+    draft: crate::db::TagDraft,
+) -> Result<crate::db::TagRecord, CommandError> {
+    state
+        .db
+        .upsert_tag(
+            &draft,
+            crate::agent_discovery::unix_timestamp().map_err(CommandError::from)?,
+        )
+        .map_err(CommandError::from)
+}
+
+#[tauri::command]
+pub fn delete_tag(state: State<'_, AppState>, id: String) -> Result<(), CommandError> {
+    state.db.delete_tag(&id).map_err(CommandError::from)
+}
+
+#[tauri::command]
+pub fn set_skill_tags(
+    state: State<'_, AppState>,
+    skill_ids: Vec<String>,
+    tag_ids: Vec<String>,
+) -> Result<(), CommandError> {
+    state
+        .db
+        .set_skill_tags(&skill_ids, &tag_ids)
+        .map_err(CommandError::from)
+}
+
+#[tauri::command]
+pub fn set_skill_tag_assignments(
+    state: State<'_, AppState>,
+    assignments: Vec<crate::db::TagAssignment>,
+) -> Result<(), CommandError> {
+    state
+        .db
+        .set_skill_tag_assignments(&assignments)
+        .map_err(CommandError::from)
+}
+
+#[tauri::command]
 pub fn preview_skill_directory(
     state: State<'_, AppState>,
     path: String,
@@ -105,11 +152,10 @@ pub fn list_agent_targets(
 }
 
 #[tauri::command]
-pub fn scan_claude_code(
+pub async fn scan_claude_code(
     state: State<'_, AppState>,
 ) -> Result<AgentDiscoverySnapshot, CommandError> {
-    let snapshot = agent_discovery::scan_claude_code(&state.db, &state.library_root)
-        .map_err(CommandError::from)?;
+    let snapshot = compatibility_scan(&state, "claude-code").await?;
     let _ = state.log.write(
         "info",
         "claude_code_scanned",
@@ -124,9 +170,10 @@ pub fn scan_claude_code(
 }
 
 #[tauri::command]
-pub fn scan_codex(state: State<'_, AppState>) -> Result<AgentDiscoverySnapshot, CommandError> {
-    let snapshot =
-        agent_discovery::scan_codex(&state.db, &state.library_root).map_err(CommandError::from)?;
+pub async fn scan_codex(
+    state: State<'_, AppState>,
+) -> Result<AgentDiscoverySnapshot, CommandError> {
+    let snapshot = compatibility_scan(&state, "codex").await?;
     let _ = state.log.write(
         "info",
         "codex_scanned",
@@ -138,6 +185,53 @@ pub fn scan_codex(state: State<'_, AppState>) -> Result<AgentDiscoverySnapshot, 
         ),
     );
     Ok(snapshot)
+}
+
+async fn compatibility_scan(
+    state: &AppState,
+    agent_id: &str,
+) -> Result<AgentDiscoverySnapshot, CommandError> {
+    crate::agent_center::start_scan(
+        &state.db,
+        &state.library_root,
+        state.scan.clone(),
+        Some(agent_id.into()),
+        None,
+    )?;
+    let controller = state.scan.clone();
+    let db_path = state.db.path().to_path_buf();
+    let agent_id = agent_id.to_string();
+    tauri::async_runtime::spawn_blocking(move || {
+        loop {
+            let status = controller
+                .status
+                .lock()
+                .map_err(|_| crate::error::AppError::State("扫描状态不可用".into()))?
+                .clone();
+            if !status.running {
+                if let Some(error) = status.error {
+                    return Err(crate::error::AppError::State(error));
+                }
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        let db = crate::db::Database::initialize(db_path)?;
+        let target = db
+            .list_agent_targets()?
+            .into_iter()
+            .find(|a| a.id == agent_id)
+            .ok_or_else(|| crate::error::AppError::State("Agent 不存在".into()))?;
+        Ok::<_, crate::error::AppError>(AgentDiscoverySnapshot {
+            target,
+            roots: db.list_discovery_roots()?,
+            instances: db.list_skill_instances()?,
+            warnings: vec![],
+        })
+    })
+    .await
+    .map_err(|_| CommandError::from(crate::error::AppError::State("扫描任务中断".into())))?
+    .map_err(Into::into)
 }
 
 #[tauri::command]

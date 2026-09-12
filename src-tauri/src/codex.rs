@@ -1,8 +1,8 @@
-use std::{
-    ffi::OsStr,
-    path::{Path, PathBuf},
-};
+#[cfg(test)]
+use std::path::Path;
+use std::{ffi::OsStr, path::PathBuf};
 
+#[cfg(test)]
 pub(crate) fn default_user_skills_roots(home: &Path) -> [PathBuf; 2] {
     [
         home.join(".codex").join("skills"),

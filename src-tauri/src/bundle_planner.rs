@@ -54,6 +54,8 @@ pub struct SyncPlanItemRecord {
     pub current_hash: Option<String>,
     pub library_hash: String,
     pub reason: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub destination_relative: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -65,6 +67,14 @@ pub struct SyncPlanRecord {
     pub items: Vec<SyncPlanItemRecord>,
     pub warnings: Vec<String>,
     pub requires_confirmation: bool,
+    #[serde(default)]
+    pub selection: Option<Vec<String>>,
+    #[serde(default)]
+    pub overwrite: bool,
+    #[serde(default)]
+    pub root_path: String,
+    #[serde(default)]
+    pub affected_agents: Vec<String>,
 }
 
 pub fn generate_sync_plan(
@@ -101,7 +111,7 @@ pub fn generate_sync_plan(
                 ))
             })?;
         let destination = root_path.join(&skill.name);
-        let deployment = safe_apply::deployment_for(db, &skill.id, &root.id)?;
+        let deployment = safe_apply::deployment_for(db, &skill.id, &root.id, &destination)?;
         let (action, current_hash, reason) = if let Some(deployment) = deployment {
             if Path::new(&deployment.destination_path) != destination {
                 warnings.push(format!(
@@ -178,6 +188,7 @@ pub fn generate_sync_plan(
             current_hash,
             library_hash: skill.content_hash.clone(),
             reason,
+            destination_relative: None,
         });
     }
 
@@ -201,6 +212,159 @@ pub fn generate_sync_plan(
         requires_confirmation: items.iter().any(|item| item.action != "unchanged"),
         items,
         warnings,
+        selection: None,
+        overwrite: false,
+        root_path: root_path.to_string_lossy().into_owned(),
+        affected_agents: Vec::new(),
+    };
+    safe_apply::persist_plan(db, &plan, unix_timestamp()?)?;
+    Ok(plan)
+}
+
+pub fn generate_selection_plan(
+    db: &Database,
+    skill_ids: &[String],
+    root_id: &str,
+) -> Result<SyncPlanRecord, AppError> {
+    generate_selection_plan_at(db, skill_ids, root_id, &std::collections::BTreeMap::new())
+}
+
+pub fn generate_selection_plan_at(
+    db: &Database,
+    skill_ids: &[String],
+    root_id: &str,
+    destinations: &std::collections::BTreeMap<String, String>,
+) -> Result<SyncPlanRecord, AppError> {
+    let mut ids = skill_ids.to_vec();
+    ids.sort();
+    ids.dedup();
+    let selections = ids
+        .into_iter()
+        .map(|id| {
+            let relative = destinations.get(&id).cloned();
+            (id, relative)
+        })
+        .collect::<Vec<_>>();
+    generate_selection_targets(db, root_id, &selections)
+}
+
+pub fn generate_selection_targets(
+    db: &Database,
+    root_id: &str,
+    targets: &[(String, Option<String>)],
+) -> Result<SyncPlanRecord, AppError> {
+    if targets.is_empty() {
+        return Err(AppError::State("请先选择技能".into()));
+    }
+    let roots = db.list_discovery_roots()?;
+    let root = roots
+        .iter()
+        .find(|r| r.id == root_id && r.enabled)
+        .ok_or_else(|| AppError::State("目标目录不可用或已关闭".into()))?;
+    if let Some(info) =
+        crate::agent_center::get::<crate::agent_center::RootInfo>(db, "root", root_id)?
+    {
+        if !info.writable {
+            return Err(AppError::State(
+                "系统或插件目录仅供查看，请选择用户或项目目录".into(),
+            ));
+        }
+    }
+    let root_path = crate::safe_apply::prospective_root(Path::new(&root.configured_path))?;
+    crate::agent_center::assert_writable_root(db, &root_path)?;
+    let library = db.list_skills()?;
+    let mut items = Vec::new();
+    let mut names = std::collections::HashSet::new();
+    let mut targets = targets.to_vec();
+    targets.sort();
+    targets.dedup();
+    let selection = targets.iter().map(|t| t.0.clone()).collect::<Vec<_>>();
+    for (id, relative) in &targets {
+        let skill = library
+            .iter()
+            .find(|s| s.id == *id)
+            .ok_or_else(|| AppError::State("技能库记录不存在，请刷新".into()))?;
+        if !names.insert(relative.as_deref().unwrap_or(&skill.name).to_lowercase()) {
+            return Err(AppError::State(format!(
+                "所选技能存在重复名称：{}",
+                skill.name
+            )));
+        }
+        let verified = skills::inspect_managed_skill(Path::new(&skill.library_path), &skill.name)?;
+        if verified.0 != skill.content_hash {
+            return Err(AppError::State(format!(
+                "技能库内容已变化，请重新导入：{}",
+                skill.name
+            )));
+        }
+        let relative = relative.clone();
+        let destination = crate::safe_apply::selection_destination(
+            &root_path,
+            relative.as_deref().unwrap_or(&skill.name),
+        )?;
+        let current_hash = crate::safe_apply::target_fingerprint(&destination)?;
+        let unchanged = std::fs::symlink_metadata(&destination)
+            .is_ok_and(|m| !m.file_type().is_symlink())
+            && skills::inspect_portable_skill(&destination)
+                .is_ok_and(|s| s.content_hash == skill.content_hash);
+        items.push(SyncPlanItemRecord {
+            id: hash_text(&format!(
+                "{root_id}\0{id}\0{}",
+                relative.as_deref().unwrap_or(&skill.name)
+            )),
+            skill_id: id.clone(),
+            skill_name: skill.name.clone(),
+            mode: "required".into(),
+            action: if unchanged {
+                "unchanged"
+            } else if current_hash.is_none() {
+                "add"
+            } else {
+                "update"
+            }
+            .into(),
+            current_hash,
+            library_hash: skill.content_hash.clone(),
+            reason: if unchanged {
+                "目标与技能库一致"
+            } else if destination.exists() || std::fs::symlink_metadata(&destination).is_ok() {
+                "备份现有内容，以技能库覆盖目标"
+            } else {
+                "安装到目标目录"
+            }
+            .into(),
+            destination_relative: relative,
+        });
+    }
+    let root_text = root_path.to_string_lossy().into_owned();
+    let affected_agents: Vec<String> = roots
+        .iter()
+        .filter(|r| {
+            crate::safe_apply::prospective_root(Path::new(&r.configured_path))
+                .is_ok_and(|p| p == root_path)
+        })
+        .map(|r| r.agent_id.clone())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let id = hash_text(&serde_json::to_string(&(
+        root_id,
+        &root_text,
+        root_path.exists(),
+        &items,
+        &affected_agents,
+    ))?);
+    let plan = SyncPlanRecord {
+        id,
+        bundle_id: String::new(),
+        root_id: root_id.into(),
+        requires_confirmation: items.iter().any(|i| i.action != "unchanged"),
+        items,
+        warnings: vec![],
+        selection: Some(selection),
+        overwrite: true,
+        root_path: root_text,
+        affected_agents,
     };
     safe_apply::persist_plan(db, &plan, unix_timestamp()?)?;
     Ok(plan)

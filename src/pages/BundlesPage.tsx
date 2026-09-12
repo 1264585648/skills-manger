@@ -1,10 +1,10 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { confirm } from "@tauri-apps/plugin-dialog";
-import { Button, EmptyState, PageHeader, StatusPill } from "../components/ui";
+import { Button, EmptyState, ErrorNotice, PageHeader, StatusPill } from "../components/ui";
 import { workspaceService } from "../services/workspaceService";
 import type { Bundle, Skill } from "../types/domain";
 
-export function BundlesPage({ onNavigateToSync }: { onNavigateToSync: (bundleId: string) => void }) {
+export function BundlesPage({ onNavigateToSync,onAddToAgent }: { onNavigateToSync: (bundleId: string) => void;onAddToAgent?:(bundleId:string)=>void }) {
   const [bundles, setBundles] = useState<Bundle[]>([]);
   const [skills, setSkills] = useState<Skill[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -13,7 +13,7 @@ export function BundlesPage({ onNavigateToSync }: { onNavigateToSync: (bundleId:
   const [description, setDescription] = useState("");
   const [skillIds, setSkillIds] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<unknown>(null);
 
   const load = useCallback(async () => {
     try {
@@ -26,7 +26,7 @@ export function BundlesPage({ onNavigateToSync }: { onNavigateToSync: (bundleId:
       setSelectedId((current) => current && nextBundles.some((item) => item.id === current) ? current : nextBundles[0]?.id ?? null);
       setError(null);
     } catch (loadError) {
-      setError(loadError instanceof Error ? loadError.message : "读取 Bundle 失败");
+      setError(loadError instanceof Error ? loadError : new Error("读取 Bundle 失败"));
     }
   }, []);
 
@@ -66,7 +66,7 @@ export function BundlesPage({ onNavigateToSync }: { onNavigateToSync: (bundleId:
       await load();
       setSelectedId(record.id);
     } catch (saveError) {
-      setError(saveError instanceof Error ? saveError.message : "保存 Bundle 失败");
+      setError(saveError instanceof Error ? saveError : new Error("保存 Bundle 失败"));
     } finally {
       setBusy(false);
     }
@@ -78,15 +78,15 @@ export function BundlesPage({ onNavigateToSync }: { onNavigateToSync: (bundleId:
       await workspaceService.deleteBundle(selected.id);
       await load();
     } catch (deleteError) {
-      setError(deleteError instanceof Error ? deleteError.message : "删除 Bundle 失败");
+      setError(deleteError instanceof Error ? deleteError : new Error("删除 Bundle 失败"));
     } finally {
       setBusy(false);
     }
   };
 
   return <section className="page">
-    <PageHeader title="Bundles" subtitle="把 Canonical Library Skills 组织成可部署组合。" actions={<Button variant="primary" onClick={beginCreate}>＋ 新建 Bundle</Button>} />
-    {error ? <div className="inline-notice notice-error">{error}</div> : null}
+    <PageHeader title="Bundles" subtitle="把 Canonical Library Skills 组织成可部署组合。" actions={<>{selected&&!editing&&onAddToAgent?<Button onClick={()=>onAddToAgent(selected.id)}>添加到 Agent</Button>:null}<Button variant="primary" onClick={beginCreate}>＋ 新建 Bundle</Button></>} />
+    {error ? <ErrorNotice error={error} onRetry={() => void load()} onDismiss={() => setError(null)} /> : null}
     <div className="workbench bundle-workbench">
       <aside className="panel-surface bundle-list"><div className="panel-title">我的 Bundles</div>{bundles.length === 0 ? <p className="muted-help bundle-empty-help">尚无 Bundle</p> : bundles.map((bundle) => <button className={selected?.id === bundle.id ? "bundle-item active" : "bundle-item"} key={bundle.id} onClick={() => { setSelectedId(bundle.id); setEditing(false); }} type="button"><span><strong>{bundle.name}</strong><small>{bundle.skillIds.length} Skills</small></span><span>›</span></button>)}</aside>
       <section className="panel-surface bundle-editor">

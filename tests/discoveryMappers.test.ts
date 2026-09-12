@@ -44,7 +44,7 @@ test("skill instance maps physical path, agent identity, security and state", ()
 test("merge preserves Library records and resolves the owning adapter", () => {
   const library: Skill[] = [{
     id: "library-1", name: "demo", description: "Canonical copy", source: "本地目录",
-    version: "1.0", status: "clean", groups: [], bundles: [], targets: [],
+    version: "1.0", status: "clean", tags: [], bundles: [], targets: [],
     lastUpdated: "2026-09-08", security: "未发现 scripts/",
   }];
   const merged = mergeLibraryAndInstances(library, [instance], [target]);

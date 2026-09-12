@@ -1,0 +1,17 @@
+{
+  "claude-code": "/agents/claude-code.svg",
+  "codex": "/agents/codex.svg",
+  "cursor": "/agents/cursor.svg",
+  "windsurf": "/agents/windsurf.svg",
+  "github-copilot": "/agents/github-copilot.svg",
+  "gemini-cli": "/agents/gemini-cli.svg",
+  "opencode": "/agents/opencode.svg",
+  "openclaw": "/agents/openclaw.svg",
+  "cline": "/agents/cline.svg",
+  "trae": "/agents/trae.svg",
+  "trae-cn": "/agents/trae-cn.svg",
+  "codebuddy": "/agents/codebuddy.svg",
+  "qoder": "/agents/qoder.svg",
+  "qwen-code": "/agents/qwen-code.svg",
+  "kimi-code": "/agents/kimi-code.svg"
+}

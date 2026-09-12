@@ -1,11 +1,31 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { confirm } from "@tauri-apps/plugin-dialog";
-import { Button, PageHeader, StatusPill, Toggle } from "../components/ui";
+import { Button, ErrorNotice, PageHeader, StatusPill, Toggle } from "../components/ui";
 import { diagnosticsService, type HealthSnapshot } from "../services/diagnosticsService";
 import { workspaceService } from "../services/workspaceService";
 import type { SourceConfig } from "../types/domain";
 import type { DiscoveryRootRecord } from "../types/discovery";
 import type { SkillUpdateRecord } from "../types/gitSources";
+
+const SCAN_ON_START_KEY = "settings.scanOnStart";
+const AUTO_CHECK_KEY = "settings.autoCheck";
+
+const readFlag = (key: string, fallback: boolean): boolean => {
+  try {
+    const raw = window.localStorage.getItem(key);
+    return raw === null ? fallback : raw === "true";
+  } catch {
+    return fallback;
+  }
+};
+
+const writeFlag = (key: string, value: boolean): void => {
+  try {
+    window.localStorage.setItem(key, String(value));
+  } catch {
+    // 隐私模式或存储不可用时静默降级：偏好不持久，但当前会话内仍生效。
+  }
+};
 
 const sections = ["Sources", "发现目录", "更新策略", "安全"] as const;
 
@@ -35,11 +55,12 @@ export function SettingsPage() {
   const [roots, setRoots] = useState<DiscoveryRootRecord[]>([]);
   const [updates, setUpdates] = useState<SkillUpdateRecord[]>([]);
   const [activeSection, setActiveSection] = useState<SettingsSection>("Sources");
-  const [scanOnStart, setScanOnStart] = useState(true);
-  const [autoCheck, setAutoCheck] = useState(true);
+  const [scanOnStart, setScanOnStart] = useState(() => readFlag(SCAN_ON_START_KEY, true));
+  const [autoCheck, setAutoCheck] = useState(() => readFlag(AUTO_CHECK_KEY, true));
+  const autoCheckTriggered = useRef(false);
   const [health, setHealth] = useState<HealthSnapshot | null>(null);
   const [healthError, setHealthError] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<unknown>(null);
   const [busy, setBusy] = useState(false);
   const [agentId, setAgentId] = useState("claude-code");
   const [gitUrl, setGitUrl] = useState("");
@@ -58,7 +79,7 @@ export function SettingsPage() {
       setUpdates(nextUpdates);
       setError(null);
     } catch (loadError) {
-      setError(loadError instanceof Error ? loadError.message : "读取设置失败");
+      setError(loadError instanceof Error ? loadError : new Error("读取设置失败"));
     }
   }, []);
 
@@ -67,13 +88,16 @@ export function SettingsPage() {
     void loadManagedSettings();
   }, [loadManagedSettings]);
 
+  useEffect(() => { writeFlag(SCAN_ON_START_KEY, scanOnStart); }, [scanOnStart]);
+  useEffect(() => { writeFlag(AUTO_CHECK_KEY, autoCheck); }, [autoCheck]);
+
   const handleAddRoot = async (): Promise<void> => {
     setBusy(true); setError(null);
     try {
       const path = await workspaceService.pickDiscoveryRoot();
       if (path) { await workspaceService.addDiscoveryRoot(path, agentId); await loadManagedSettings(); }
     } catch (rootError) {
-      setError(rootError instanceof Error ? rootError.message : "添加发现目录失败");
+      setError(rootError instanceof Error ? rootError : new Error("添加发现目录失败"));
     } finally { setBusy(false); }
   };
 
@@ -81,7 +105,7 @@ export function SettingsPage() {
     if (!(await confirm(`仅移除发现配置，不会改动 Agent 文件：\n${root.configuredPath}`))) return;
     setBusy(true);
     try { await workspaceService.removeDiscoveryRoot(root.id); await loadManagedSettings(); }
-    catch (rootError) { setError(rootError instanceof Error ? rootError.message : "移除发现目录失败"); }
+    catch (rootError) { setError(rootError instanceof Error ? rootError : new Error("移除发现目录失败")); }
     finally { setBusy(false); }
   };
 
@@ -93,7 +117,7 @@ export function SettingsPage() {
       setGitUrl(""); setGitSubpath("");
       await loadManagedSettings();
     } catch (gitError) {
-      setError(gitError instanceof Error ? gitError.message : "登记 Git Source 失败");
+      setError(gitError instanceof Error ? gitError : new Error("登记 Git Source 失败"));
     } finally { setBusy(false); }
   };
 
@@ -111,9 +135,17 @@ export function SettingsPage() {
     } finally { setBusy(false); }
   };
 
+  // autoCheck 的真实副作用：进入设置页且已登记 Git Source 时自动 fetch 一次。
+  // 只在挂载后触发一次，避免 loadManagedSettings 刷新 updates 时重复请求。
+  useEffect(() => {
+    if (!autoCheck || autoCheckTriggered.current || updates.length === 0) return;
+    autoCheckTriggered.current = true;
+    void handleCheckAllUpdates();
+  }, [autoCheck, updates.length]);
+
   return <section className="page">
     <PageHeader title="Settings" subtitle="配置受限来源、Agent Roots 与本地安全边界。" />
-    {error ? <div className="inline-notice notice-error" role="alert">{error}</div> : null}
+    {error ? <ErrorNotice error={error} onDismiss={() => setError(null)} /> : null}
     <div className="workbench settings-workbench">
       <aside className="panel-surface settings-nav">
         {sections.map((item) => (
@@ -194,8 +226,8 @@ export function SettingsPage() {
 
         {activeSection === "更新策略" ? <>
           <div className="settings-options">
-            <div><span><strong>启动时扫描</strong><small>保留为显式偏好；扫描本身始终只读。</small></span><Toggle checked={scanOnStart} onChange={setScanOnStart} /></div>
-            <div><span><strong>自动检查更新</strong><small>只 fetch 到应用 checkout，不自动 Promote 或部署。</small></span><Toggle checked={autoCheck} onChange={setAutoCheck} /></div>
+            <div><span><strong>启动时扫描</strong><small>偏好已本地保存，重启后保留。扫描本身始终只读；真正的应用启动扫描需桌面端接入，当前尚未接线。</small></span><Toggle checked={scanOnStart} onChange={setScanOnStart} /></div>
+            <div><span><strong>自动检查更新</strong><small>偏好已本地保存。开启后进入本页会自动 fetch 一次；只 fetch 到应用 checkout，不自动 Promote 或部署。</small></span><Toggle checked={autoCheck} onChange={setAutoCheck} /></div>
           </div>
 
           <div className="bundle-skill-list">

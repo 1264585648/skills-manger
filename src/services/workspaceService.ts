@@ -5,7 +5,7 @@ import { formatTimestamp } from "./formatTimestamp";
 import { createSkillImportPlan } from "./importPlanService";
 import { mapAgentTarget, mergeLibraryAndInstances } from "./discoveryMappers.ts";
 import { mapBundleRecord } from "./bundlePlannerMappers.ts";
-import type { Agent, Bundle, Skill, SourceConfig, SyncItem } from "../types/domain";
+import type { Agent, Bundle, Skill, SkillTag, SourceConfig, SyncItem } from "../types/domain";
 import type {
   AgentDiscoverySnapshot,
   AgentTargetRecord,
@@ -39,6 +39,21 @@ type LibrarySkillRecord = {
   updatedAt: number;
 };
 
+type BackendTagRecord = {
+  id: string;
+  name: string;
+  isSystem: boolean;
+  skillCount: number;
+  skillIds: string[];
+};
+export type SkillTagAssignment = { skillId: string; tagIds: string[] };
+
+const systemTagNames = ["编码", "UI", "办公", "Review"];
+const browserTagAssignments = new Map<string, string[]>(
+  mockSkills.map((skill) => [skill.id, [...skill.tags]]),
+);
+const browserCustomTags = new Map<string, SkillTag>();
+
 type SkillImportPreviewRecord = {
   path: string;
   name: string;
@@ -70,7 +85,7 @@ const mapLibrarySkill = (record: LibrarySkillRecord): Skill => ({
   contentHash: record.contentHash,
   version: record.version ?? "—",
   status: "clean",
-  groups: [],
+  tags: [],
   bundles: [],
   targets: [],
   lastUpdated: formatTimestamp(record.updatedAt),
@@ -100,27 +115,102 @@ const ensureDesktop = (): void => {
 
 export const workspaceService = {
   async getSkills(): Promise<Skill[]> {
-    if (!isTauriRuntime()) return copy(mockSkills);
-    const [records, instances, targets, updates] = await Promise.all([
+    if (!isTauriRuntime()) {
+      return copy(mockSkills).map((skill) => ({ ...skill, tags: browserTagAssignments.get(skill.id) ?? [] }));
+    }
+    const [records, instances, targets, updates, tagRecords] = await Promise.all([
       invoke<LibrarySkillRecord[]>("list_library_skills"),
       invoke<SkillInstanceRecord[]>("list_skill_instances"),
       invoke<AgentTargetRecord[]>("list_agent_targets"),
       invoke<SkillUpdateRecord[]>("list_skill_updates"),
+      invoke<BackendTagRecord[]>("list_tags"),
     ]);
+    const tagsBySkill = new Map<string, string[]>();
+    for (const tag of tagRecords) {
+      for (const skillId of tag.skillIds) {
+        tagsBySkill.set(skillId, [...(tagsBySkill.get(skillId) ?? []), tag.name]);
+      }
+    }
     const bySkill = new Map(updates.map((update) => [update.skillId, update]));
     const library = records.map((record) => {
       const skill = mapLibrarySkill(record);
       const update = bySkill.get(record.id);
-      if (!update) return skill;
       return {
         ...skill,
-        status: update.status,
-        trackedSourceId: update.sourceId,
-        updateStatus: update.status,
-        canPromote: update.canPromote,
+        ...(update
+          ? {
+              status: update.status,
+              trackedSourceId: update.sourceId,
+              updateStatus: update.status,
+              canPromote: update.canPromote,
+            }
+          : {}),
+        tags: tagsBySkill.get(record.id) ?? [],
       } satisfies Skill;
     });
     return mergeLibraryAndInstances(library, instances, targets);
+  },
+
+  async getTags(): Promise<SkillTag[]> {
+    if (!isTauriRuntime()) {
+      const skills = await this.getSkills();
+      const builtins = systemTagNames.map((name, index) => ({
+        id: `tag-${["coding", "ui", "office", "review"][index]}`,
+        name,
+        isSystem: true,
+        skillCount: skills.filter((skill) => skill.status !== "unmanaged" && skill.tags.includes(name)).length,
+      }));
+      return [...builtins, ...Array.from(browserCustomTags.values()).map((tag) => ({
+        ...tag,
+        skillCount: skills.filter((skill) => skill.status !== "unmanaged" && skill.tags.includes(tag.name)).length,
+      }))];
+    }
+    const records = await invoke<BackendTagRecord[]>("list_tags");
+    return records.map(({ skillIds: _skillIds, ...tag }) => tag);
+  },
+
+  async upsertTag(name: string, id?: string): Promise<SkillTag> {
+    if (!isTauriRuntime()) {
+      const normalized = name.trim();
+      const tagId = id ?? `tag-browser-${normalized.toLowerCase().replace(/\s+/g, "-")}`;
+      const previousName = id ? browserCustomTags.get(id)?.name : undefined;
+      const tag = { id: tagId, name: normalized, isSystem: false, skillCount: 0 };
+      browserCustomTags.set(tagId, tag);
+      if (previousName && previousName !== normalized) {
+        for (const [skillId, assigned] of browserTagAssignments) {
+          browserTagAssignments.set(skillId, assigned.map((assignedName) => assignedName === previousName ? normalized : assignedName));
+        }
+      }
+      return tag;
+    }
+    const record = await invoke<BackendTagRecord>("upsert_tag", { draft: { id: id ?? null, name } });
+    return { id: record.id, name: record.name, isSystem: record.isSystem, skillCount: record.skillCount };
+  },
+
+  async deleteTag(id: string): Promise<void> {
+    if (!isTauriRuntime()) {
+      const deletedName = browserCustomTags.get(id)?.name;
+      browserCustomTags.delete(id);
+      if (deletedName) for (const [skillId, tags] of browserTagAssignments) browserTagAssignments.set(skillId, tags.filter((tag) => tag !== deletedName));
+      return;
+    }
+    await invoke("delete_tag", { id });
+  },
+
+  async setSkillTags(skillIds: string[], tagIds: string[]): Promise<void> {
+    await this.updateSkillTagAssignments(skillIds.map((skillId) => ({ skillId, tagIds })));
+  },
+
+  async updateSkillTagAssignments(assignments: SkillTagAssignment[]): Promise<void> {
+    if (!isTauriRuntime()) {
+      const tags = await this.getTags();
+      for (const assignment of assignments) {
+        const names = assignment.tagIds.map((tagId) => tags.find((tag) => tag.id === tagId)?.name).filter((name): name is string => Boolean(name));
+        browserTagAssignments.set(assignment.skillId, [...names]);
+      }
+      return;
+    }
+    await invoke("set_skill_tag_assignments", { assignments });
   },
 
   async pickSkillDirectory(): Promise<string | null> {
@@ -275,9 +365,14 @@ export const workspaceService = {
   async scanAgents(): Promise<AgentDiscoverySnapshot[]> {
     ensureDesktop();
     try {
-      const claude = await invoke<AgentDiscoverySnapshot>("scan_claude_code");
-      const codex = await invoke<AgentDiscoverySnapshot>("scan_codex");
-      return [claude, codex];
+      await invoke("start_agent_scan", { agentId: null, rootId: null });
+      let snapshot = await invoke<{ scan: { running: boolean; error: string | null } }>("get_agent_center");
+      while (snapshot.scan.running) {
+        await new Promise(resolve => setTimeout(resolve, 500));
+        snapshot = await invoke("get_agent_center");
+      }
+      if (snapshot.scan.error) throw new Error(snapshot.scan.error);
+      return [];
     } catch (error) {
       throw new Error(formatCommandError(error));
     }

@@ -1,0 +1,10 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import { initialAgent,LatestRequest,filterSkills,rememberSession,sessionView } from "../src/services/agentWorkspaceState.ts";
+import type { AgentCenterSnapshot,AgentPreferences,ManagedSkill } from "../src/types/agentCenter.ts";
+const prefs:AgentPreferences={lastAgentId:null,scopes:{},targets:{},sorts:{}};
+const snapshot={catalog:[{id:"claude-code"},{id:"codex"}],detections:{codex:{status:"installed"}},roots:[]} as unknown as AgentCenterSnapshot;
+test("first entry selects a detected agent while an unavailable remembered context is preserved",()=>{assert.equal(initialAgent(snapshot,prefs),"codex");assert.equal(initialAgent(snapshot,{...prefs,lastAgentId:"claude-code"}),"claude-code");assert.equal(initialAgent(snapshot,prefs,"requested"),"requested");});
+test("outdated previews cannot supersede a newer selection",()=>{const requests=new LatestRequest();const slow=requests.next();const fast=requests.next();assert.equal(requests.current(slow),false);assert.equal(requests.current(fast),true);requests.invalidate();assert.equal(requests.current(fast),false);});
+test("only actionable updates enter the update filter, and names do not imply ownership",()=>{const skills=[{id:"external",name:"demo",description:"",state:"added",canUpdate:false},{id:"linked",name:"demo",description:"",state:"update",canUpdate:true},{id:"readonly",name:"demo",description:"",state:"update",canUpdate:false}] as ManagedSkill[];assert.deepEqual(filterSkills(skills,"","update","name").map(s=>s.id),["linked"]);});
+test("filter and scroll preferences remain isolated by agent and scope",()=>{rememberSession("claude:user",{query:"review",filter:"issues",scroll:200});rememberSession("claude:project",{query:"",filter:"all",scroll:0});assert.equal(sessionView("claude:user").scroll,200);assert.equal(sessionView("claude:project").query,"");assert.equal(sessionView("codex:user").scroll,0);});

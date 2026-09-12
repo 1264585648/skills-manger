@@ -22,3 +22,8 @@ sha2 = "0.10"
 tauri = { version = "2.11.5", features = [] }
 tauri-plugin-dialog = "2"
 thiserror = "2"
+toml = "0.8"
+json5 = "0.4"
+
+[target.'cfg(windows)'.dependencies]
+winreg = "0.55"

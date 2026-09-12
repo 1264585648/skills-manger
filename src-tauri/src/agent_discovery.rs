@@ -8,7 +8,9 @@ use std::{
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
-use crate::{claude_code, codex, db::Database, error::AppError, skills};
+#[cfg(test)]
+use crate::skills;
+use crate::{claude_code, codex, db::Database, error::AppError};
 
 const CLAUDE_CODE_ID: &str = "claude-code";
 const CODEX_ID: &str = "codex";
@@ -77,111 +79,6 @@ pub struct AgentDiscoverySnapshot {
     pub roots: Vec<DiscoveryRootRecord>,
     pub instances: Vec<SkillInstanceRecord>,
     pub warnings: Vec<String>,
-}
-
-pub fn initialize_agents(db: &Database) -> Result<(), AppError> {
-    initialize_claude_code(db)?;
-    let timestamp = unix_timestamp()?;
-    ensure_codex_target_registration(db, timestamp)?;
-    if let Some(home) = claude_code::current_home() {
-        ensure_codex_default_roots(db, &home, timestamp)?;
-    }
-    Ok(())
-}
-
-pub fn initialize_claude_code(db: &Database) -> Result<(), AppError> {
-    let timestamp = unix_timestamp()?;
-    ensure_target_registration(db, timestamp)?;
-
-    if let Some(home) = claude_code::current_home() {
-        ensure_default_user_root(db, &claude_code::default_user_skills_root(&home), timestamp)?;
-    }
-    Ok(())
-}
-
-pub fn scan_claude_code(
-    db: &Database,
-    library_root: &Path,
-) -> Result<AgentDiscoverySnapshot, AppError> {
-    let home = claude_code::current_home().ok_or_else(|| {
-        AppError::State("the current user home directory is unavailable".to_string())
-    })?;
-    let path_value = std::env::var_os("PATH").unwrap_or_default();
-    scan_claude_code_with_environment(db, library_root, &home, &path_value, unix_timestamp()?)
-}
-
-pub fn scan_codex(db: &Database, library_root: &Path) -> Result<AgentDiscoverySnapshot, AppError> {
-    let home = claude_code::current_home().ok_or_else(|| {
-        AppError::State("the current user home directory is unavailable".to_string())
-    })?;
-    let path_value = std::env::var_os("PATH").unwrap_or_default();
-    scan_codex_with_environment(db, library_root, &home, &path_value, unix_timestamp()?)
-}
-
-fn scan_codex_with_environment(
-    db: &Database,
-    library_root: &Path,
-    home: &Path,
-    path_value: &OsStr,
-    timestamp: i64,
-) -> Result<AgentDiscoverySnapshot, AppError> {
-    let mut target = detect_codex_target(Some((path_value, timestamp)));
-    let executable_warning = target.last_warning.clone();
-    db.upsert_agent_target(&target, timestamp)?;
-    ensure_codex_default_roots(db, home, timestamp)?;
-
-    let roots = db.list_discovery_roots()?;
-    let mut warnings = executable_warning.into_iter().collect::<Vec<_>>();
-    for root in roots
-        .iter()
-        .filter(|root| root.agent_id == CODEX_ID && root.enabled)
-    {
-        warnings.extend(scan_and_persist_root(db, root, library_root, timestamp)?);
-    }
-    target.last_warning = (!warnings.is_empty()).then(|| warnings.join("; "));
-    let target = db.upsert_agent_target(&target, timestamp)?;
-    Ok(AgentDiscoverySnapshot {
-        target,
-        roots: db.list_discovery_roots()?,
-        instances: db.list_skill_instances()?,
-        warnings,
-    })
-}
-
-fn scan_claude_code_with_environment(
-    db: &Database,
-    library_root: &Path,
-    home: &Path,
-    path_value: &OsStr,
-    timestamp: i64,
-) -> Result<AgentDiscoverySnapshot, AppError> {
-    let mut target = detect_target(Some((path_value, timestamp)));
-    let executable_warning = target.last_warning.clone();
-    db.upsert_agent_target(&target, timestamp)?;
-    ensure_default_user_root(db, &claude_code::default_user_skills_root(home), timestamp)?;
-
-    let roots = db.list_discovery_roots()?;
-    let mut warnings = executable_warning.into_iter().collect::<Vec<_>>();
-    for root in roots
-        .iter()
-        .filter(|root| root.agent_id == CLAUDE_CODE_ID && root.enabled)
-    {
-        warnings.extend(scan_and_persist_root(db, root, library_root, timestamp)?);
-    }
-
-    target.last_warning = if warnings.is_empty() {
-        None
-    } else {
-        Some(warnings.join("; "))
-    };
-    let target = db.upsert_agent_target(&target, timestamp)?;
-
-    Ok(AgentDiscoverySnapshot {
-        target,
-        roots: db.list_discovery_roots()?,
-        instances: db.list_skill_instances()?,
-        warnings,
-    })
 }
 
 pub fn register_project_root(
@@ -317,56 +214,6 @@ fn detect_codex_target(environment: Option<(&OsStr, i64)>) -> AgentTargetRecord 
     }
 }
 
-fn ensure_codex_default_roots(db: &Database, home: &Path, timestamp: i64) -> Result<(), AppError> {
-    for path in codex::default_user_skills_roots(home)
-        .into_iter()
-        .filter(|path| path.is_dir())
-    {
-        let configured_path = path.to_string_lossy().into_owned();
-        let canonical_path = path
-            .canonicalize()
-            .ok()
-            .map(|value| value.to_string_lossy().into_owned());
-        db.upsert_discovery_root(
-            &DiscoveryRootRecord {
-                id: hash_text(&format!("{CODEX_ID}\0user\0{configured_path}")),
-                agent_id: CODEX_ID.to_string(),
-                scope: "user".to_string(),
-                configured_path,
-                canonical_path,
-                enabled: true,
-                is_default: true,
-                last_warning: None,
-            },
-            timestamp,
-        )?;
-    }
-    Ok(())
-}
-
-fn ensure_default_user_root(
-    db: &Database,
-    path: &Path,
-    timestamp: i64,
-) -> Result<DiscoveryRootRecord, AppError> {
-    let configured_path = path.to_string_lossy().into_owned();
-    let canonical_path = path
-        .canonicalize()
-        .ok()
-        .map(|value| value.to_string_lossy().into_owned());
-    let record = DiscoveryRootRecord {
-        id: stable_root_id("user", &configured_path),
-        agent_id: CLAUDE_CODE_ID.to_string(),
-        scope: "user".to_string(),
-        configured_path,
-        canonical_path,
-        enabled: true,
-        is_default: true,
-        last_warning: None,
-    };
-    db.upsert_discovery_root(&record, timestamp)
-}
-
 fn validate_real_directory(path: &Path) -> Result<(), AppError> {
     let metadata = fs::symlink_metadata(path).map_err(|error| {
         AppError::InvalidSkill(format!(
@@ -421,6 +268,7 @@ fn stable_root_id(scope: &str, path: &str) -> String {
     hash_text(&format!("{CLAUDE_CODE_ID}\0{scope}\0{path}"))
 }
 
+#[cfg(test)]
 pub(crate) fn scan_and_persist_root(
     db: &Database,
     root: &DiscoveryRootRecord,
@@ -542,7 +390,7 @@ pub(crate) fn scan_and_persist_root(
             Ok(inspected) => {
                 let canonical_path = inspected.source_path.to_string_lossy().into_owned();
                 instances.push(SkillInstanceDraft {
-                    id: stable_instance_id(&root.scope, &canonical_path),
+                    id: stable_instance_id(&root.agent_id, &root.id, &root.scope, &canonical_path),
                     agent_id: root.agent_id.clone(),
                     root_id: root.id.clone(),
                     scope: root.scope.clone(),
@@ -571,6 +419,7 @@ pub(crate) fn scan_and_persist_root(
     Ok(warnings)
 }
 
+#[cfg(test)]
 fn persist_root_warning(
     db: &Database,
     root: &DiscoveryRootRecord,
@@ -585,8 +434,9 @@ fn persist_root_warning(
     Ok(())
 }
 
-fn stable_instance_id(scope: &str, canonical_path: &str) -> String {
-    hash_text(&format!("{CLAUDE_CODE_ID}\0{scope}\0{canonical_path}"))
+#[cfg(test)]
+fn stable_instance_id(agent_id: &str, root_id: &str, scope: &str, canonical_path: &str) -> String {
+    hash_text(&format!("{agent_id}\0{root_id}\0{scope}\0{canonical_path}"))
 }
 
 fn hash_text(value: &str) -> String {

@@ -1,5 +1,5 @@
-import { useEffect, useState } from "react";
-import { Button, EmptyState, PageHeader, StatusPill } from "../components/ui";
+import { useCallback, useEffect, useState } from "react";
+import { Button, EmptyState, ErrorNotice, PageHeader, StatusPill } from "../components/ui";
 import { workspaceService } from "../services/workspaceService";
 import type { ApplyOperationRecord } from "../types/bundlePlanner";
 import type { Agent, Bundle, PageKey, Skill, SkillStatus } from "../types/domain";
@@ -24,27 +24,30 @@ export function HomePage({ onNavigate }: { onNavigate: (page: PageKey) => void }
   const [bundles, setBundles] = useState<Bundle[]>([]);
   const [operations, setOperations] = useState<ApplyOperationRecord[]>([]);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<unknown>(null);
 
-  useEffect(() => {
-    void Promise.all([
-      workspaceService.getSkills(),
-      workspaceService.getAgents(),
-      workspaceService.getBundles(),
-      workspaceService.getApplyOperations(),
-    ])
-      .then(([nextSkills, nextAgents, nextBundles, nextOperations]) => {
-        setSkills(nextSkills);
-        setAgents(nextAgents);
-        setBundles(nextBundles);
-        setOperations(nextOperations);
-        setError(null);
-      })
-      .catch((loadError: unknown) =>
-        setError(loadError instanceof Error ? loadError.message : "读取环境概览失败"),
-      )
-      .finally(() => setLoading(false));
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      const [nextSkills, nextAgents, nextBundles, nextOperations] = await Promise.all([
+        workspaceService.getSkills(),
+        workspaceService.getAgents(),
+        workspaceService.getBundles(),
+        workspaceService.getApplyOperations(),
+      ]);
+      setSkills(nextSkills);
+      setAgents(nextAgents);
+      setBundles(nextBundles);
+      setOperations(nextOperations);
+      setError(null);
+    } catch (loadError: unknown) {
+      setError(loadError instanceof Error ? loadError : new Error("读取环境概览失败"));
+    } finally {
+      setLoading(false);
+    }
   }, []);
+
+  useEffect(() => { void load(); }, [load]);
 
   const libraryCount = skills.filter((skill) => !skill.id.startsWith("instance:")).length;
   const discoveredCount = skills.filter((skill) => skill.status === "unmanaged").length;
@@ -58,7 +61,7 @@ export function HomePage({ onNavigate }: { onNavigate: (page: PageKey) => void }
       subtitle="本机 Skill 资产、Agent 与最近部署操作的实时状态。"
       actions={<Button variant="primary" onClick={() => onNavigate("skills")}>＋ 导入 Skill</Button>}
     />
-    {error ? <div className="inline-notice notice-error" role="alert">{error}</div> : null}
+    {error ? <ErrorNotice error={error} onRetry={() => void load()} onDismiss={() => setError(null)} /> : null}
 
     <div className="summary-row summary-three">
       <article><span>Library Skills</span><strong>{libraryCount}</strong></article>

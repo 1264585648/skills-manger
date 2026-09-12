@@ -14,6 +14,7 @@ pub struct SkillImportPreview {
     pub action: String,
     pub reason: String,
     pub content_hash: String,
+    pub script_count: i64,
     pub existing_skill_id: Option<String>,
 }
 
@@ -58,6 +59,7 @@ pub fn preview_skill_directory(
         action: action.to_string(),
         reason: reason.to_string(),
         content_hash: inspected.content_hash,
+        script_count: inspected.script_count,
         existing_skill_id: existing.map(|skill| skill.id),
     })
 }

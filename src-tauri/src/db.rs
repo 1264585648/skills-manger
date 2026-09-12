@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use rusqlite::{params, types::Type, Connection, OptionalExtension, Row, Transaction};
+use serde::{Deserialize, Serialize};
 
 use crate::{
     agent_discovery::{
@@ -16,6 +17,30 @@ use crate::{
 #[derive(Debug)]
 pub struct Database {
     path: PathBuf,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TagRecord {
+    pub id: String,
+    pub name: String,
+    pub is_system: bool,
+    pub skill_count: i64,
+    pub skill_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TagDraft {
+    pub id: Option<String>,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TagAssignment {
+    pub skill_id: String,
+    pub tag_ids: Vec<String>,
 }
 
 impl Database {
@@ -39,6 +64,10 @@ impl Database {
                 name TEXT PRIMARY KEY,
                 value INTEGER NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS agent_center_records (
+                kind TEXT NOT NULL, id TEXT NOT NULL, payload_json TEXT NOT NULL,
+                PRIMARY KEY(kind,id));
 
             INSERT OR IGNORE INTO counters (name, value)
             VALUES ('m0_write_test', 0);
@@ -72,6 +101,24 @@ impl Database {
 
             CREATE INDEX IF NOT EXISTS idx_skills_name ON skills(name);
             CREATE INDEX IF NOT EXISTS idx_skills_updated_at ON skills(updated_at DESC);
+
+            CREATE TABLE IF NOT EXISTS tags (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL COLLATE NOCASE UNIQUE,
+                is_system INTEGER NOT NULL DEFAULT 0,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS skill_tags (
+                skill_id TEXT NOT NULL,
+                tag_id TEXT NOT NULL,
+                PRIMARY KEY(skill_id, tag_id),
+                FOREIGN KEY(skill_id) REFERENCES skills(id) ON DELETE CASCADE,
+                FOREIGN KEY(tag_id) REFERENCES tags(id) ON DELETE CASCADE
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_skill_tags_tag ON skill_tags(tag_id);
 
             CREATE TABLE IF NOT EXISTS agent_targets (
                 id TEXT PRIMARY KEY,
@@ -197,6 +244,10 @@ impl Database {
                 FOREIGN KEY(skill_id) REFERENCES skills(id) ON DELETE RESTRICT
             );
 
+            CREATE TABLE IF NOT EXISTS apply_previous_records (
+                operation_id TEXT NOT NULL, skill_id TEXT NOT NULL, payload_json TEXT NOT NULL,
+                PRIMARY KEY(operation_id,skill_id));
+
             CREATE TABLE IF NOT EXISTS git_sources (
                 id TEXT PRIMARY KEY,
                 skill_id TEXT NOT NULL UNIQUE,
@@ -226,11 +277,66 @@ impl Database {
             );
 
             INSERT INTO schema_meta (key, value)
-            VALUES ('schema_version', '6')
+            VALUES ('schema_version', '7')
             ON CONFLICT(key) DO UPDATE SET value = excluded.value;
+
+            INSERT OR IGNORE INTO tags (id, name, is_system, created_at, updated_at)
+            VALUES
+                ('tag-coding', '编码', 1, 0, 0),
+                ('tag-ui', 'UI', 1, 0, 0),
+                ('tag-office', '办公', 1, 0, 0),
+                ('tag-review', 'Review', 1, 0, 0);
             ",
         )?;
 
+        let has_selection_plans: bool = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM schema_meta WHERE key='selection_plan_version')",
+            [],
+            |r| r.get(0),
+        )?;
+        if !has_selection_plans {
+            // Direct skill selections have no Bundle owner. Keep plan IDs and operation references.
+            connection.execute_batch(
+                "PRAGMA foreign_keys=OFF; BEGIN IMMEDIATE;
+                CREATE TABLE sync_plans_next (
+                    id TEXT PRIMARY KEY, bundle_id TEXT NOT NULL, root_id TEXT NOT NULL,
+                    payload_json TEXT NOT NULL, status TEXT NOT NULL,
+                    created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+                    FOREIGN KEY(root_id) REFERENCES discovery_roots(id) ON DELETE CASCADE);
+                INSERT INTO sync_plans_next SELECT * FROM sync_plans;
+                DROP TABLE sync_plans;
+                ALTER TABLE sync_plans_next RENAME TO sync_plans;
+                INSERT INTO schema_meta(key,value) VALUES ('selection_plan_version','1');
+                COMMIT; PRAGMA foreign_keys=ON;",
+            )?;
+        }
+        let location_version: bool = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM schema_meta WHERE key='deployment_location_version')",
+            [],
+            |r| r.get(0),
+        )?;
+        if !location_version {
+            connection.execute_batch("PRAGMA foreign_keys=OFF; BEGIN IMMEDIATE;
+                CREATE TABLE deployments_next (
+                  id TEXT PRIMARY KEY,skill_id TEXT NOT NULL,root_id TEXT NOT NULL,destination_path TEXT NOT NULL,
+                  deployed_hash TEXT NOT NULL,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL,
+                  UNIQUE(root_id,destination_path),FOREIGN KEY(skill_id) REFERENCES skills(id) ON DELETE RESTRICT,
+                  FOREIGN KEY(root_id) REFERENCES discovery_roots(id) ON DELETE CASCADE);
+                INSERT INTO deployments_next SELECT * FROM deployments;
+                CREATE TABLE apply_operation_items_next (
+                  operation_id TEXT NOT NULL,skill_id TEXT NOT NULL,action TEXT NOT NULL,destination_path TEXT NOT NULL,
+                  status TEXT NOT NULL,snapshot_path TEXT,deployed_hash TEXT,error TEXT,position INTEGER NOT NULL,
+                  PRIMARY KEY(operation_id,position),FOREIGN KEY(operation_id) REFERENCES apply_operations(id) ON DELETE CASCADE,
+                  FOREIGN KEY(skill_id) REFERENCES skills(id) ON DELETE RESTRICT);
+                INSERT INTO apply_operation_items_next SELECT * FROM apply_operation_items;
+                CREATE TABLE apply_previous_records_next(operation_id TEXT NOT NULL,skill_id TEXT NOT NULL,position INTEGER NOT NULL,payload_json TEXT NOT NULL,PRIMARY KEY(operation_id,position));
+                INSERT INTO apply_previous_records_next SELECT p.operation_id,p.skill_id,i.position,p.payload_json FROM apply_previous_records p JOIN apply_operation_items i ON p.operation_id=i.operation_id AND p.skill_id=i.skill_id;
+                DROP TABLE deployments; ALTER TABLE deployments_next RENAME TO deployments;
+                DROP TABLE apply_operation_items; ALTER TABLE apply_operation_items_next RENAME TO apply_operation_items;
+                DROP TABLE apply_previous_records; ALTER TABLE apply_previous_records_next RENAME TO apply_previous_records;
+                INSERT INTO schema_meta(key,value) VALUES ('deployment_location_version','1');
+                COMMIT; PRAGMA foreign_keys=ON;")?;
+        }
         Ok(database)
     }
 
@@ -578,6 +684,176 @@ impl Database {
         Ok(())
     }
 
+    pub fn list_tags(&self) -> Result<Vec<TagRecord>, AppError> {
+        let connection = self.connect()?;
+        let mut statement = connection.prepare(
+            "SELECT t.id, t.name, t.is_system, COUNT(st.skill_id)
+             FROM tags t LEFT JOIN skill_tags st ON st.tag_id = t.id
+             GROUP BY t.id, t.name, t.is_system
+             ORDER BY t.is_system DESC, t.name COLLATE NOCASE ASC",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)? != 0,
+                row.get::<_, i64>(3)?,
+            ))
+        })?;
+        let headers = rows.collect::<Result<Vec<_>, _>>()?;
+        headers
+            .into_iter()
+            .map(|(id, name, is_system, skill_count)| {
+                let mut links = connection.prepare(
+                    "SELECT skill_id FROM skill_tags WHERE tag_id = ?1 ORDER BY skill_id",
+                )?;
+                let skill_ids = links
+                    .query_map(params![id], |row| row.get::<_, String>(0))?
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(TagRecord {
+                    id,
+                    name,
+                    is_system,
+                    skill_count,
+                    skill_ids,
+                })
+            })
+            .collect()
+    }
+
+    pub fn upsert_tag(&self, draft: &TagDraft, timestamp: i64) -> Result<TagRecord, AppError> {
+        let name = draft.name.trim();
+        if name.is_empty() || name.chars().count() > 32 {
+            return Err(AppError::State(
+                "标签名称不能为空且不能超过 32 个字符".to_string(),
+            ));
+        }
+        let mut connection = self.connect()?;
+        let transaction = connection.transaction()?;
+        if let Some(id) = &draft.id {
+            let is_system: Option<bool> = transaction
+                .query_row(
+                    "SELECT is_system != 0 FROM tags WHERE id = ?1",
+                    params![id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            match is_system {
+                Some(true) => return Err(AppError::State("系统标签不可重命名".to_string())),
+                None => return Err(AppError::State("标签不存在".to_string())),
+                Some(false) => {
+                    transaction.execute(
+                        "UPDATE tags SET name = ?1, updated_at = ?2 WHERE id = ?3",
+                        params![name, timestamp, id],
+                    )?;
+                }
+            }
+        } else {
+            let mut id = format!("tag-custom-{timestamp}");
+            let mut suffix = 1;
+            while transaction.query_row(
+                "SELECT EXISTS(SELECT 1 FROM tags WHERE id = ?1)",
+                params![id],
+                |row| row.get::<_, bool>(0),
+            )? {
+                id = format!("tag-custom-{timestamp}-{suffix}");
+                suffix += 1;
+            }
+            transaction.execute(
+                "INSERT INTO tags (id, name, is_system, created_at, updated_at) VALUES (?1, ?2, 0, ?3, ?3)",
+                params![id, name, timestamp],
+            )?;
+        }
+        transaction.commit()?;
+        self.list_tags()?
+            .into_iter()
+            .find(|tag| tag.name.eq_ignore_ascii_case(name))
+            .ok_or_else(|| AppError::State("标签保存后未找到记录".to_string()))
+    }
+
+    pub fn delete_tag(&self, id: &str) -> Result<(), AppError> {
+        let connection = self.connect()?;
+        let is_system: Option<bool> = connection
+            .query_row(
+                "SELECT is_system != 0 FROM tags WHERE id = ?1",
+                params![id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        match is_system {
+            Some(true) => Err(AppError::State("系统标签不可删除".to_string())),
+            None => Err(AppError::State("标签不存在".to_string())),
+            Some(false) => {
+                connection.execute("DELETE FROM tags WHERE id = ?1", params![id])?;
+                Ok(())
+            }
+        }
+    }
+
+    pub fn set_skill_tag_assignments(&self, assignments: &[TagAssignment]) -> Result<(), AppError> {
+        let mut connection = self.connect()?;
+        let transaction = connection.transaction()?;
+        let mut seen_skills = std::collections::HashSet::new();
+        let mut valid_tags = std::collections::HashSet::new();
+        for assignment in assignments {
+            if !seen_skills.insert(assignment.skill_id.clone()) {
+                return Err(AppError::State(
+                    "同一批次不能重复提交同一个 Skill".to_string(),
+                ));
+            }
+            let exists: bool = transaction.query_row(
+                "SELECT EXISTS(SELECT 1 FROM skills WHERE id = ?1)",
+                params![assignment.skill_id],
+                |row| row.get(0),
+            )?;
+            if !exists {
+                return Err(AppError::State(format!(
+                    "Library Skill was not found: {}",
+                    assignment.skill_id
+                )));
+            }
+            for tag_id in &assignment.tag_ids {
+                if valid_tags.contains(tag_id) {
+                    continue;
+                }
+                let tag_exists: bool = transaction.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM tags WHERE id = ?1)",
+                    params![tag_id],
+                    |row| row.get(0),
+                )?;
+                if !tag_exists {
+                    return Err(AppError::State(format!("标签不存在: {tag_id}")));
+                }
+                valid_tags.insert(tag_id.clone());
+            }
+        }
+        for assignment in assignments {
+            transaction.execute(
+                "DELETE FROM skill_tags WHERE skill_id = ?1",
+                params![assignment.skill_id],
+            )?;
+            for tag_id in &assignment.tag_ids {
+                transaction.execute(
+                    "INSERT OR IGNORE INTO skill_tags (skill_id, tag_id) VALUES (?1, ?2)",
+                    params![assignment.skill_id, tag_id],
+                )?;
+            }
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
+    pub fn set_skill_tags(&self, skill_ids: &[String], tag_ids: &[String]) -> Result<(), AppError> {
+        let assignments = skill_ids
+            .iter()
+            .map(|skill_id| TagAssignment {
+                skill_id: skill_id.clone(),
+                tag_ids: tag_ids.to_vec(),
+            })
+            .collect::<Vec<_>>();
+        self.set_skill_tag_assignments(&assignments)
+    }
+
     pub fn list_skills(&self) -> Result<Vec<SkillRecord>, AppError> {
         let connection = self.connect()?;
         let mut statement = connection.prepare(
@@ -894,7 +1170,7 @@ mod tests {
     use crate::bundle_planner::{BundleDraft, BundleItemDraft};
     use crate::skills::SkillDraft;
 
-    use super::Database;
+    use super::{Database, TagDraft};
 
     #[test]
     fn counter_persists_across_database_reopen() {
@@ -992,7 +1268,7 @@ mod tests {
             reopened
                 .schema_version()
                 .expect("schema version should read"),
-            "6"
+            "7"
         );
         assert_eq!(
             reopened.list_agent_targets().expect("targets should list"),
@@ -1092,6 +1368,84 @@ mod tests {
         assert_eq!(bundles[0].updated_at, 30);
 
         drop(reopened);
+        let _ = fs::remove_dir_all(test_dir);
+    }
+
+    #[test]
+    fn tags_are_seeded_persisted_and_system_tags_are_protected() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let test_dir = std::env::temp_dir().join(format!("skills-manger-tags-{nonce}"));
+        fs::create_dir_all(&test_dir).unwrap();
+        let database = Database::initialize(test_dir.join("tags.sqlite3")).unwrap();
+        let names: Vec<_> = database
+            .list_tags()
+            .unwrap()
+            .into_iter()
+            .map(|tag| tag.name)
+            .collect();
+        assert_eq!(names, vec!["Review", "UI", "办公", "编码"]);
+        database
+            .upsert_skill(&SkillDraft {
+                id: "tagged-skill".into(),
+                source_id: "tagged-source".into(),
+                source_kind: "local".into(),
+                source_locator: "C:/tagged".into(),
+                relative_path: ".".into(),
+                name: "tagged-skill".into(),
+                description: "Fixture".into(),
+                version: None,
+                license: None,
+                compatibility: None,
+                allowed_tools: None,
+                metadata_json: "{}".into(),
+                content_hash: "hash".into(),
+                library_path: "C:/library/tagged-skill".into(),
+                script_count: 0,
+                timestamp: 1,
+            })
+            .unwrap();
+        let tag_ids: Vec<_> = database
+            .list_tags()
+            .unwrap()
+            .into_iter()
+            .filter(|tag| tag.name == "编码" || tag.name == "Review")
+            .map(|tag| tag.id)
+            .collect();
+        database
+            .set_skill_tags(&["tagged-skill".into()], &tag_ids)
+            .unwrap();
+        let tagged = database
+            .list_tags()
+            .unwrap()
+            .into_iter()
+            .filter(|tag| tag.skill_count == 1)
+            .count();
+        assert_eq!(tagged, 2);
+        assert!(database.delete_tag("tag-coding").is_err());
+        let custom = database
+            .upsert_tag(
+                &TagDraft {
+                    id: None,
+                    name: "自定义".into(),
+                },
+                2,
+            )
+            .unwrap();
+        database.delete_tag(&custom.id).unwrap();
+        drop(database);
+        let reopened = Database::initialize(test_dir.join("tags.sqlite3")).unwrap();
+        assert_eq!(
+            reopened
+                .list_tags()
+                .unwrap()
+                .into_iter()
+                .filter(|tag| tag.skill_count == 1)
+                .count(),
+            2
+        );
         let _ = fs::remove_dir_all(test_dir);
     }
 }

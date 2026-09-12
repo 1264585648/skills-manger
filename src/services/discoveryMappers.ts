@@ -44,12 +44,14 @@ export const mapSkillInstance = (
   contentHash: record.contentHash,
   version: "—",
   status: record.state,
-  groups: [],
+  tags: [],
   bundles: [],
   targets: [agentName],
   lastUpdated: formatTimestamp(record.lastDiscoveredAt),
   security:
-    record.scriptCount > 0
+    !record.contentHash
+      ? "脚本尚未检查"
+      : record.scriptCount > 0
       ? `包含 scripts/ · ${record.scriptCount} 个文件 · 未执行`
       : "未发现 scripts/",
 });

@@ -19,3 +19,7 @@ target/
 Thumbs.db
 .idea/
 .vscode/
+
+# Local Agent Center QA artifacts
+output/
+.playwright-cli/

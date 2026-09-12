@@ -1,11 +1,12 @@
 import type { Agent, Bundle, Skill, SourceConfig, SyncItem } from "../types/domain";
 
 export const mockSkills: Skill[] = [
-  { id: "skill-human-read-tech-html", name: "human-read-tech-html", description: "把复杂技术方案整理成人类阅读友好的单页 HTML。", source: "GitHub · main", version: "v1.8.2", status: "update", groups: ["文档方案", "研发效率"], bundles: ["研发通用工具包"], targets: ["Claude Code", "Codex"], lastUpdated: "2 天前", security: "2 个 scripts · 未执行" },
-  { id: "skill-archify", name: "archify", description: "从结构化描述生成技术架构图。", source: "Local", version: "v0.9.4", status: "clean", groups: ["文档方案"], bundles: ["研发通用工具包"], targets: ["Claude Code"], lastUpdated: "今天", security: "无可执行脚本" },
-  { id: "skill-code-review", name: "code-review", description: "代码评审流程与检查清单。", source: "Claude User", version: "untracked", status: "unmanaged", groups: ["代码评审"], bundles: [], targets: ["Claude Code"], lastUpdated: "5 天前", security: "外部 Skill · 尚未接管" },
-  { id: "skill-java-testing", name: "java-testing", description: "Java 测试策略与常用测试模式。", source: "Library", version: "v1.2.0", status: "conflict", groups: ["研发效率"], bundles: ["后端开发"], targets: ["Claude Code"], lastUpdated: "昨天", security: "无可执行脚本" },
-  { id: "skill-design-to-code", name: "design-to-code", description: "从设计稿组织前端实现步骤。", source: "GitHub · pinned", version: "v2.1.0", status: "clean", groups: ["研发效率"], bundles: ["前端开发"], targets: ["Claude Code", "Codex"], lastUpdated: "1 周前", security: "1 个 script · 未执行" },
+  { id: "skill-human-read-tech-html", name: "human-read-tech-html", description: "把复杂技术方案整理成人类阅读友好的单页 HTML。", source: "GitHub · main", version: "v1.8.2", status: "update", tags: ["办公"], bundles: ["研发通用工具包"], targets: ["Claude Code", "Codex"], lastUpdated: "2 天前", security: "2 个 scripts · 未执行" },
+  { id: "skill-archify", name: "archify", description: "从结构化描述生成技术架构图。", source: "Local", version: "v0.9.4", status: "clean", tags: ["编码", "UI"], bundles: ["研发通用工具包"], targets: ["Claude Code"], lastUpdated: "今天", security: "无可执行脚本" },
+  { id: "skill-code-review", name: "code-review", description: "代码评审流程与检查清单。", source: "Claude User", version: "untracked", status: "unmanaged", tags: ["Review"], bundles: [], targets: ["Claude Code"], lastUpdated: "5 天前", security: "外部 Skill · 尚未接管" },
+  { id: "skill-java-testing", name: "java-testing", description: "Java 测试策略与常用测试模式。", source: "Library", version: "v1.2.0", status: "conflict", tags: ["编码", "Review"], bundles: ["后端开发"], targets: ["Claude Code"], lastUpdated: "昨天", security: "无可执行脚本" },
+  { id: "skill-design-to-code", name: "design-to-code", description: "从设计稿组织前端实现步骤。", source: "GitHub · pinned", version: "v2.1.0", status: "clean", tags: ["UI", "编码"], bundles: ["前端开发"], targets: ["Claude Code", "Codex"], lastUpdated: "1 周前", security: "1 个 script · 未执行" },
+  { id: "skill-spreadsheet-export", name: "spreadsheet-export", description: "将结构化数据整理为可交付的表格。", source: "Local", version: "v0.3.0", status: "clean", tags: [], bundles: [], targets: ["Codex"], lastUpdated: "今天", security: "未发现 scripts/" },
 ];
 
 export const mockBundles: Bundle[] = [

@@ -113,7 +113,25 @@ pub fn import_skill_directory(
     library_root: &Path,
     source: impl AsRef<Path>,
 ) -> Result<ImportSkillResult, AppError> {
-    let canonical_source = source.as_ref().canonicalize()?;
+    import_skill_directory_as(db, library_root, source.as_ref(), None)
+}
+
+pub(crate) fn import_skill_directory_with_origin(
+    db: &Database,
+    library_root: &Path,
+    source: &Path,
+    origin: &Path,
+) -> Result<ImportSkillResult, AppError> {
+    import_skill_directory_as(db, library_root, source, Some(origin))
+}
+
+fn import_skill_directory_as(
+    db: &Database,
+    library_root: &Path,
+    source: &Path,
+    origin: Option<&Path>,
+) -> Result<ImportSkillResult, AppError> {
+    let canonical_source = source.canonicalize()?;
     if !canonical_source.is_dir() {
         return Err(AppError::InvalidSkill(
             "selected path is not a directory".to_string(),
@@ -127,7 +145,15 @@ pub fn import_skill_directory(
         ));
     }
 
-    let inspected = inspect_skill(&canonical_source)?;
+    let mut inspected = inspect_skill(&canonical_source)?;
+    let source_locator = origin
+        .map(Path::canonicalize)
+        .transpose()?
+        .unwrap_or_else(|| canonical_source.clone());
+    if origin.is_some() {
+        inspected.source_id = hash_text(&format!("local\0{}", source_locator.to_string_lossy()));
+        inspected.skill_id = hash_text(&format!("{}\0.", inspected.source_id));
+    }
     let existing = db.skill_by_identity(&inspected.source_id, ".")?;
 
     if let Some(skill) = &existing {
@@ -174,7 +200,7 @@ pub fn import_skill_directory(
         id: inspected.skill_id.clone(),
         source_id: inspected.source_id,
         source_kind: "local".to_string(),
-        source_locator: inspected.source_path.to_string_lossy().into_owned(),
+        source_locator: source_locator.to_string_lossy().into_owned(),
         relative_path: ".".to_string(),
         name: staged_contents.name,
         description: staged_contents.description,
@@ -600,9 +626,26 @@ pub(crate) fn copy_tree(source: &Path, destination: &Path) -> Result<(), AppErro
 }
 
 pub(crate) fn remove_if_exists(path: &Path) -> Result<(), AppError> {
-    if path.is_dir() {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(m) => m,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e.into()),
+    };
+    if metadata.file_type().is_symlink() {
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::FileTypeExt;
+            if metadata.file_type().is_symlink_dir() {
+                fs::remove_dir(path)?;
+            } else {
+                fs::remove_file(path)?;
+            }
+        }
+        #[cfg(not(windows))]
+        fs::remove_file(path)?;
+    } else if metadata.is_dir() {
         fs::remove_dir_all(path)?;
-    } else if path.exists() {
+    } else {
         fs::remove_file(path)?;
     }
     Ok(())

@@ -32,6 +32,7 @@ export interface SyncPlanItemRecord {
   currentHash: string | null;
   libraryHash: string;
   reason: string;
+  destinationRelative?: string | null;
 }
 
 export interface SyncPlanRecord {
@@ -58,6 +59,8 @@ export interface ApplyOperationRecord {
   id: string;
   planId: string;
   status: "running" | "succeeded" | "rolled_back" | "rollback_failed";
+  canRestore?: boolean;
+  backupState?: "available" | "missing" | "not-needed";
   error: string | null;
   startedAt: number;
   finishedAt: number | null;
