@@ -39,6 +39,12 @@ const issueStatuses = new Set<SkillStatus>(["local_modified", "target_drift", "c
 const isDiscoverySkill = (skill: Skill): boolean =>
   skill.id.startsWith("instance:") || skill.status === "unmanaged";
 
+const isTauriRuntime = (): boolean =>
+  typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+
+const requestConfirmation = async (message: string): Promise<boolean> =>
+  isTauriRuntime() ? confirm(message) : window.confirm(message);
+
 const formatError = (error: unknown, fallback: string): string =>
   error instanceof Error ? error.message : fallback;
 
@@ -198,7 +204,7 @@ export function SkillsPage() {
   };
 
   const handlePromoteSource = async (sourceId: string): Promise<void> => {
-    const accepted = await confirm(
+    const accepted = await requestConfirmation(
       "将已检查的来源版本写入技能库。此步骤不会修改任何 Agent 部署位置，是否继续？",
     );
     if (!accepted) return;
@@ -407,7 +413,7 @@ export function SkillsPage() {
   };
 
   const handleDeleteGroup = async (group: SkillGroupRecord): Promise<boolean> => {
-    const accepted = await confirm(
+    const accepted = await requestConfirmation(
       `删除分组“${group.name}”？其中的 ${group.skillIds.length} 个 Skill 不会被删除，Bundle 与部署也不会变化。`,
     );
     if (!accepted) return false;
