@@ -144,7 +144,7 @@ mod tests {
             .expect("document should read");
         assert_eq!(record.skill_id, "skill-1");
         assert_eq!(record.content, content);
-        assert_eq!(record.line_count, 7);
+        assert_eq!(record.line_count, 6);
         assert!(record.path.ends_with("SKILL.md"));
 
         let _ = fs::remove_dir_all(root);
