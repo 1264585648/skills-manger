@@ -17,13 +17,17 @@ const formatCommandError = (error: unknown): string => {
   return "操作失败";
 };
 
+const isDiscoverySkill = (skill: Skill): boolean =>
+  skill.id.startsWith("instance:") || skill.status === "unmanaged";
+
 const buildMockGroups = (): SkillGroupRecord[] => {
-  const names = Array.from(new Set(mockSkills.flatMap((skill) => skill.groups)))
+  const librarySkills = mockSkills.filter((skill) => !isDiscoverySkill(skill));
+  const names = Array.from(new Set(librarySkills.flatMap((skill) => skill.groups)))
     .sort((left, right) => left.localeCompare(right));
   return names.map((name, index) => ({
     id: `mock-group-${index + 1}`,
     name,
-    skillIds: mockSkills
+    skillIds: librarySkills
       .filter((skill) => skill.groups.includes(name))
       .map((skill) => skill.id),
     createdAt: index + 1,
@@ -50,8 +54,8 @@ export const applySkillGroups = (
     }
   }
 
-  return skills.map((skill) => skill.id.startsWith("instance:")
-    ? skill
+  return skills.map((skill) => isDiscoverySkill(skill)
+    ? { ...skill, groups: [] }
     : {
       ...skill,
       groups: [...(namesBySkill.get(skill.id) ?? [])]
