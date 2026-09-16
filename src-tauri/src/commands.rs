@@ -9,6 +9,7 @@ use crate::{
     error::CommandError,
     git_sources::{self, GitSourceDraft, SkillUpdateRecord},
     safe_apply::{self, ApplyOperationRecord, DeploymentRecord},
+    skill_documents::{self, SkillDocumentRecord},
     skill_preview::{self, SkillImportPreview},
     skills::{self, ImportSkillResult, SkillRecord},
     AppState,
@@ -66,6 +67,15 @@ pub fn increment_counter(state: State<'_, AppState>) -> Result<CounterSnapshot, 
 #[tauri::command]
 pub fn list_library_skills(state: State<'_, AppState>) -> Result<Vec<SkillRecord>, CommandError> {
     state.db.list_skills().map_err(CommandError::from)
+}
+
+#[tauri::command]
+pub fn read_skill_document(
+    state: State<'_, AppState>,
+    skill_id: String,
+) -> Result<SkillDocumentRecord, CommandError> {
+    skill_documents::read_skill_document(&state.db, &state.library_root, &skill_id)
+        .map_err(CommandError::from)
 }
 
 #[tauri::command]
