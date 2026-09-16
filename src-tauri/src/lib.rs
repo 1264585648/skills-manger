@@ -8,6 +8,7 @@ mod error;
 mod git_sources;
 mod logging;
 mod safe_apply;
+mod skill_documents;
 mod skill_preview;
 mod skills;
 
@@ -54,6 +55,7 @@ pub fn run() {
             commands::get_health,
             commands::increment_counter,
             commands::list_library_skills,
+            commands::read_skill_document,
             commands::preview_skill_directory,
             commands::import_skill_directory,
             commands::list_agent_targets,
