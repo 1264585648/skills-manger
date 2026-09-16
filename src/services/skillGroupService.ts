@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import { mockSkills } from "../data/mock";
+import { mockSkills } from "../data/mock.ts";
 import type { Skill } from "../types/domain";
 import type { SkillGroupDraft, SkillGroupRecord } from "../types/skillGroups";
 
