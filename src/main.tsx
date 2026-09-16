@@ -6,6 +6,7 @@ import "./m2.css";
 import "./workflow.css";
 import "./skills.css";
 import "./skills-workflows.css";
+import "./groups.css";
 
 const root = document.getElementById("root");
 
