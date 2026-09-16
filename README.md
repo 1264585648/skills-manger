@@ -218,4 +218,4 @@ src-tauri/src/
 
 ## 当前状态
 
-V1 的 M0-M6 功能代码已合入 `main`。本分支继续优化 Skills 工作台与持久化 Group；任何 Agent 文件写入仍必须经过显式 Sync Plan、ownership 校验和可恢复操作。
+V1 的 M0-M6 功能代码已合入 `main`。后续工作聚焦于持续集成回归、桌面 E2E 证据和发布流程维护；任何 Agent 文件写入仍必须经过显式 Sync Plan、ownership 校验和可恢复操作。
