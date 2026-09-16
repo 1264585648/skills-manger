@@ -18,6 +18,18 @@ export interface SkillTrust {
 
 export type SkillStatus = "clean" | "update" | "upstream_update" | "local_modified" | "target_drift" | "unmanaged" | "conflict" | "missing";
 
+export interface SkillDeployment {
+  id: string;
+  rootId: string;
+  agentId: string;
+  agentName: string;
+  scope: "user" | "project" | "unknown";
+  rootPath: string;
+  destinationPath: string;
+  deployedHash: string;
+  updatedAt: string;
+}
+
 export interface Skill {
   id: string;
   name: string;
@@ -31,6 +43,7 @@ export interface Skill {
   groups: string[];
   bundles: string[];
   targets: string[];
+  deployments?: SkillDeployment[];
   lastUpdated: string;
   security: string;
   license?: string;
