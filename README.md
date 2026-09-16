@@ -164,8 +164,58 @@ npm run desktop:build
 ## 代码结构
 
 ```text
-src/                 React UI、页面、领域类型与前端 service
-src-tauri/src/       Rust command、SQLite、发现、规划与安全写入内核
-tests/               前端 Node 单元测试
-docs/                设计、计划、技术方案与 E2E 报告
+src/
+├── components/       # 公共 UI primitives
+├── data/             # 浏览器预览 / 尚未接真实数据的 mock
+├── layout/           # App Shell
+├── pages/            # 五个一级页面
+├── services/         # 页面数据访问 / Tauri command 边界
+├── types/            # 前端领域类型
+├── App.tsx
+└── styles.css
+
+src-tauri/src/
+├── commands.rs       # Tauri commands
+├── db.rs             # SQLite schema / repository
+├── agent_discovery.rs # Agent roots / SkillInstance 扫描与协调
+├── claude_code.rs     # 无进程启动的 PATH / 默认 root 检测
+├── codex.rs            # Codex PATH / 默认 root 检测
+├── bundle_planner.rs   # Bundle 与 Sync Plan
+├── safe_apply.rs       # Snapshot / Apply / Verify / Rollback
+├── git_sources.rs      # Git Source 更新与 promote
+├── skill_groups.rs     # Group 与成员关系持久化
+├── skill_documents.rs  # 安全读取 SKILL.md 预览
+├── skills.rs         # SKILL.md 解析、校验、Hash、Library 导入
+├── error.rs
+├── logging.rs
+└── lib.rs
 ```
+
+原则：页面只依赖 service，不直接操作 SQLite 或任意文件系统。
+
+## CI
+
+`.github/workflows/m0-checks.yml` 当前作为桌面基础质量门禁：
+
+- Ubuntu：Frontend tests、TypeScript typecheck + Vite build；
+- Windows：Frontend typecheck、Rust fmt/clippy/tests + Tauri debug installer build；
+- Windows installer bundle 作为 Actions artifact 上传。
+
+## 技术方案与 UI
+
+- [人类阅读版技术方案](docs/technical-solution.html)
+- [结构化方案源 `solution.json`](docs/solution.json)
+- [高保真交互 UI 原型](docs/ui/index.html)
+
+## V1 核心原则
+
+1. **Discovery ≠ Adopt**：发现 Skill 不代表自动接管。
+2. **Sync ≠ Overwrite**：所有写入先生成 Sync Plan。
+3. **Agent Directory ≠ Source of Truth**：Canonical Library 是 desired state。
+4. **Group 只分类，Bundle 才表达部署组合。**
+5. **不同 Agent 通过 Capability 声明能力，不假设都是本地目录复制。**
+6. **扫描与同步阶段绝不执行第三方 Skill 内 scripts。**
+
+## 当前状态
+
+V1 的 M0-M6 功能代码已合入 `main`。本分支继续优化 Skills 工作台与持久化 Group；任何 Agent 文件写入仍必须经过显式 Sync Plan、ownership 校验和可恢复操作。
