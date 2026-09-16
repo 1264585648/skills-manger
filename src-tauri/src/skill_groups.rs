@@ -154,11 +154,12 @@ pub fn set_skill_groups(
     timestamp: i64,
 ) -> Result<Vec<SkillGroupRecord>, AppError> {
     let mut seen = HashSet::new();
-    let unique_group_ids = group_ids
-        .iter()
-        .filter(|id| seen.insert((*id).clone()))
-        .cloned()
-        .collect::<Vec<_>>();
+    let mut unique_group_ids = Vec::new();
+    for group_id in group_ids {
+        if seen.insert(group_id.clone()) {
+            unique_group_ids.push(group_id.clone());
+        }
+    }
 
     let mut connection = db.connect()?;
     let transaction = connection.transaction()?;
@@ -185,9 +186,8 @@ pub fn set_skill_groups(
     }
 
     let previous_group_ids = {
-        let mut statement = transaction.prepare(
-            "SELECT group_id FROM skill_group_items WHERE skill_id = ?1",
-        )?;
+        let mut statement =
+            transaction.prepare("SELECT group_id FROM skill_group_items WHERE skill_id = ?1")?;
         let rows = statement.query_map(params![skill_id], |row| row.get::<_, String>(0))?;
         rows.collect::<Result<Vec<_>, _>>()?
     };
@@ -230,9 +230,7 @@ fn validate_group_name(value: &str) -> Result<String, AppError> {
         )));
     }
     if name.chars().any(char::is_control) {
-        return Err(AppError::State(
-            "分组名称不能包含控制字符".to_string(),
-        ));
+        return Err(AppError::State("分组名称不能包含控制字符".to_string()));
     }
     Ok(name.to_string())
 }
@@ -318,11 +316,13 @@ mod tests {
     fn groups_persist_membership_rename_and_delete() {
         let root = fixture_root();
         fs::create_dir_all(&root).expect("fixture directory should exist");
-        let database = Database::initialize(root.join("groups.sqlite3"))
-            .expect("database should initialize");
+        let database =
+            Database::initialize(root.join("groups.sqlite3")).expect("database should initialize");
         initialize(&database).expect("group schema should initialize");
         assert_eq!(
-            database.schema_version().expect("schema version should read"),
+            database
+                .schema_version()
+                .expect("schema version should read"),
             "7"
         );
 
@@ -358,7 +358,8 @@ mod tests {
         .expect("group should create");
         assert!(group.skill_ids.is_empty());
 
-        let groups = set_skill_groups(&database, "skill-1", &[group.id.clone()], 30)
+        let selected_group_ids = vec![group.id.clone()];
+        let groups = set_skill_groups(&database, "skill-1", &selected_group_ids, 30)
             .expect("membership should persist");
         assert_eq!(groups[0].skill_ids, vec!["skill-1"]);
 
@@ -375,7 +376,9 @@ mod tests {
         assert_eq!(renamed.skill_ids, vec!["skill-1"]);
 
         delete_group(&database, &group.id).expect("group should delete");
-        assert!(list_groups(&database).expect("groups should list").is_empty());
+        assert!(list_groups(&database)
+            .expect("groups should list")
+            .is_empty());
 
         drop(database);
         let _ = fs::remove_dir_all(root);
