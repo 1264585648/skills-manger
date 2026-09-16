@@ -9,6 +9,7 @@ mod git_sources;
 mod logging;
 mod safe_apply;
 mod skill_documents;
+mod skill_groups;
 mod skill_preview;
 mod skills;
 
@@ -36,6 +37,7 @@ pub fn run() {
 
             let log = AppLog::new(app_data_dir.join("skills-manager.log"))?;
             let db = Database::initialize(app_data_dir.join("skills-manager.sqlite3"))?;
+            skill_groups::initialize(&db)?;
             agent_discovery::initialize_agents(&db)?;
 
             let _ = log.write(
@@ -58,6 +60,10 @@ pub fn run() {
             commands::read_skill_document,
             commands::preview_skill_directory,
             commands::import_skill_directory,
+            commands::list_skill_groups,
+            commands::upsert_skill_group,
+            commands::delete_skill_group,
+            commands::set_skill_groups,
             commands::list_agent_targets,
             commands::scan_claude_code,
             commands::scan_codex,
