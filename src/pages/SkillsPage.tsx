@@ -373,7 +373,6 @@ export function SkillsPage() {
           ? `组合关系未全部保存；已有 ${savedCount} 个 Bundle 更新成功。${formatError(error, "后续保存失败")}`
           : formatError(error, "保存组合关系失败"),
       });
-      throw error;
     } finally {
       setBundleBusy(false);
     }
