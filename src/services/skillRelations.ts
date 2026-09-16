@@ -7,9 +7,11 @@ import type {
   BundleRecord,
   DeploymentRecord,
 } from "../types/bundlePlanner.ts";
+import type { SkillGroupRecord } from "../types/skillGroups.ts";
 import { formatTimestamp } from "./formatTimestamp.ts";
 
 export interface SkillRelationContext {
+  groups: SkillGroupRecord[];
   bundles: BundleRecord[];
   deployments: DeploymentRecord[];
   roots: DiscoveryRootRecord[];
@@ -24,8 +26,17 @@ export const enrichLibrarySkillRelations = (
 ): Skill[] => {
   const rootById = new Map(context.roots.map((root) => [root.id, root]));
   const targetById = new Map(context.targets.map((target) => [target.id, target]));
+  const groupsBySkill = new Map<string, string[]>();
   const bundlesBySkill = new Map<string, string[]>();
   const deploymentsBySkill = new Map<string, SkillDeployment[]>();
+
+  for (const group of context.groups) {
+    for (const skillId of group.skillIds) {
+      const names = groupsBySkill.get(skillId) ?? [];
+      names.push(group.name);
+      groupsBySkill.set(skillId, names);
+    }
+  }
 
   for (const bundle of context.bundles) {
     for (const item of bundle.items) {
@@ -61,6 +72,10 @@ export const enrichLibrarySkillRelations = (
         `${left.agentName}\0${left.rootPath}\0${left.destinationPath}`
           .localeCompare(`${right.agentName}\0${right.rootPath}\0${right.destinationPath}`),
       );
+    const groupNames = unique([
+      ...skill.groups,
+      ...(groupsBySkill.get(skill.id) ?? []),
+    ]).sort((left, right) => left.localeCompare(right));
     const bundleNames = unique([
       ...skill.bundles,
       ...(bundlesBySkill.get(skill.id) ?? []),
@@ -69,6 +84,7 @@ export const enrichLibrarySkillRelations = (
 
     return {
       ...skill,
+      groups: groupNames,
       bundles: bundleNames,
       deployments,
       targets: deploymentTargets.length > 0
