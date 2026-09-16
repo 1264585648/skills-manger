@@ -5,6 +5,7 @@ import { formatTimestamp } from "./formatTimestamp";
 import { createSkillImportPlan } from "./importPlanService";
 import { mapAgentTarget, mergeLibraryAndInstances } from "./discoveryMappers.ts";
 import { mapBundleRecord } from "./bundlePlannerMappers.ts";
+import { enrichLibrarySkillRelations } from "./skillRelations.ts";
 import type { Agent, Bundle, Skill, SourceConfig, SyncItem } from "../types/domain";
 import type {
   AgentDiscoverySnapshot,
@@ -50,6 +51,14 @@ type SkillImportPreviewRecord = {
   existingSkillId: string | null;
 };
 
+export type SkillDocument = {
+  skillId: string;
+  path: string;
+  content: string;
+  sizeBytes: number;
+  lineCount: number;
+};
+
 export type ImportSkillResult = {
   outcome: "created" | "updated" | "unchanged";
   skill: Skill;
@@ -73,6 +82,7 @@ const mapLibrarySkill = (record: LibrarySkillRecord): Skill => ({
   groups: [],
   bundles: [],
   targets: [],
+  deployments: [],
   lastUpdated: formatTimestamp(record.updatedAt),
   security:
     record.scriptCount > 0
@@ -98,14 +108,58 @@ const ensureDesktop = (): void => {
   }
 };
 
+const createMockSkillDocument = (skill: Skill): SkillDocument => {
+  const content = [
+    "---",
+    `name: ${skill.name}`,
+    `description: ${JSON.stringify(skill.description)}`,
+    skill.license ? `license: ${skill.license}` : null,
+    skill.compatibility ? `compatibility: ${JSON.stringify(skill.compatibility)}` : null,
+    skill.allowedTools ? `allowed-tools: ${skill.allowedTools}` : null,
+    "---",
+    "",
+    `# ${skill.name}`,
+    "",
+    skill.description,
+    "",
+    "> 浏览器预览使用模拟内容；桌面应用会读取真实 SKILL.md。",
+    "",
+  ].filter((line): line is string => line !== null).join("\n");
+
+  return {
+    skillId: skill.id,
+    path: `${skill.sourcePath ?? skill.name}/SKILL.md`,
+    content,
+    sizeBytes: new TextEncoder().encode(content).length,
+    lineCount: content.split("\n").length,
+  };
+};
+
+const mockBundleRecords = (): BundleRecord[] =>
+  mockBundles.map((bundle, bundleIndex) => ({
+    id: bundle.id,
+    name: bundle.name,
+    description: bundle.description,
+    items: bundle.skillIds.map((skillId, position) => ({
+      skillId,
+      mode: "required",
+      position,
+    })),
+    createdAt: bundleIndex + 1,
+    updatedAt: bundleIndex + 1,
+  }));
+
 export const workspaceService = {
   async getSkills(): Promise<Skill[]> {
     if (!isTauriRuntime()) return copy(mockSkills);
-    const [records, instances, targets, updates] = await Promise.all([
+    const [records, instances, targets, updates, bundles, deployments, roots] = await Promise.all([
       invoke<LibrarySkillRecord[]>("list_library_skills"),
       invoke<SkillInstanceRecord[]>("list_skill_instances"),
       invoke<AgentTargetRecord[]>("list_agent_targets"),
       invoke<SkillUpdateRecord[]>("list_skill_updates"),
+      invoke<BundleRecord[]>("list_bundles"),
+      invoke<DeploymentRecord[]>("list_deployments"),
+      invoke<DiscoveryRootRecord[]>("list_discovery_roots"),
     ]);
     const bySkill = new Map(updates.map((update) => [update.skillId, update]));
     const library = records.map((record) => {
@@ -120,7 +174,26 @@ export const workspaceService = {
         canPromote: update.canPromote,
       } satisfies Skill;
     });
-    return mergeLibraryAndInstances(library, instances, targets);
+    const enrichedLibrary = enrichLibrarySkillRelations(library, {
+      bundles,
+      deployments,
+      roots,
+      targets,
+    });
+    return mergeLibraryAndInstances(enrichedLibrary, instances, targets);
+  },
+
+  async getSkillDocument(skillId: string): Promise<SkillDocument> {
+    if (!isTauriRuntime()) {
+      const skill = mockSkills.find((item) => item.id === skillId);
+      if (!skill) throw new Error("未找到模拟 Skill 内容");
+      return createMockSkillDocument(skill);
+    }
+    try {
+      return await invoke<SkillDocument>("read_skill_document", { skillId });
+    } catch (error) {
+      throw new Error(formatCommandError(error));
+    }
   },
 
   async pickSkillDirectory(): Promise<string | null> {
@@ -204,7 +277,7 @@ export const workspaceService = {
   },
 
   async getBundleRecords(): Promise<BundleRecord[]> {
-    if (!isTauriRuntime()) return [];
+    if (!isTauriRuntime()) return copy(mockBundleRecords());
     return invoke<BundleRecord[]>("list_bundles");
   },
 

@@ -9,6 +9,8 @@ use crate::{
     error::CommandError,
     git_sources::{self, GitSourceDraft, SkillUpdateRecord},
     safe_apply::{self, ApplyOperationRecord, DeploymentRecord},
+    skill_documents::{self, SkillDocumentRecord},
+    skill_groups::{self, SkillGroupDraft, SkillGroupRecord},
     skill_preview::{self, SkillImportPreview},
     skills::{self, ImportSkillResult, SkillRecord},
     AppState,
@@ -69,6 +71,15 @@ pub fn list_library_skills(state: State<'_, AppState>) -> Result<Vec<SkillRecord
 }
 
 #[tauri::command]
+pub fn read_skill_document(
+    state: State<'_, AppState>,
+    skill_id: String,
+) -> Result<SkillDocumentRecord, CommandError> {
+    skill_documents::read_skill_document(&state.db, &state.library_root, &skill_id)
+        .map_err(CommandError::from)
+}
+
+#[tauri::command]
 pub fn preview_skill_directory(
     state: State<'_, AppState>,
     path: String,
@@ -95,6 +106,64 @@ pub fn import_skill_directory(
     );
 
     Ok(result)
+}
+
+#[tauri::command]
+pub fn list_skill_groups(
+    state: State<'_, AppState>,
+) -> Result<Vec<SkillGroupRecord>, CommandError> {
+    skill_groups::list_groups(&state.db).map_err(CommandError::from)
+}
+
+#[tauri::command]
+pub fn upsert_skill_group(
+    state: State<'_, AppState>,
+    draft: SkillGroupDraft,
+) -> Result<SkillGroupRecord, CommandError> {
+    let group = skill_groups::upsert_group(
+        &state.db,
+        &draft,
+        agent_discovery::unix_timestamp().map_err(CommandError::from)?,
+    )
+    .map_err(CommandError::from)?;
+    let _ = state.log.write(
+        "info",
+        "skill_group_saved",
+        &format!("Skill group saved: {}", group.name),
+    );
+    Ok(group)
+}
+
+#[tauri::command]
+pub fn delete_skill_group(state: State<'_, AppState>, id: String) -> Result<(), CommandError> {
+    skill_groups::delete_group(&state.db, &id).map_err(CommandError::from)?;
+    let _ = state.log.write(
+        "info",
+        "skill_group_deleted",
+        &format!("Skill group deleted: {id}"),
+    );
+    Ok(())
+}
+
+#[tauri::command]
+pub fn set_skill_groups(
+    state: State<'_, AppState>,
+    skill_id: String,
+    group_ids: Vec<String>,
+) -> Result<Vec<SkillGroupRecord>, CommandError> {
+    let groups = skill_groups::set_skill_groups(
+        &state.db,
+        &skill_id,
+        &group_ids,
+        agent_discovery::unix_timestamp().map_err(CommandError::from)?,
+    )
+    .map_err(CommandError::from)?;
+    let _ = state.log.write(
+        "info",
+        "skill_groups_updated",
+        &format!("Skill group membership updated: {skill_id}"),
+    );
+    Ok(groups)
 }
 
 #[tauri::command]
