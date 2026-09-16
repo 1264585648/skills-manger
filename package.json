@@ -7,7 +7,7 @@
     "dev": "vite --host 0.0.0.0 --port 1420",
     "build": "tsc --noEmit && vite build",
     "typecheck": "tsc --noEmit",
-    "test:frontend": "node --test tests/formatTimestamp.test.ts tests/discoveryMappers.test.ts tests/bundlePlannerMappers.test.ts",
+    "test:frontend": "node --test tests/formatTimestamp.test.ts tests/discoveryMappers.test.ts tests/bundlePlannerMappers.test.ts tests/skillRelations.test.ts",
     "preview": "vite preview",
     "tauri": "tauri",
     "desktop:dev": "tauri dev",
@@ -23,7 +23,6 @@
     "@tauri-apps/cli": "2.11.4",
     "@types/react": "19.2.18",
     "@types/react-dom": "19.2.7",
-    "@vitejs/plugin-react": "6.1.1",
     "typescript": "7.0.2",
     "vite": "8.2.2"
   }
