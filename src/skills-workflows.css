@@ -1,0 +1,235 @@
+.skill-detail-tabs-four {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.skill-content-panel {
+  padding-top: 17px;
+}
+
+.skill-document-toolbar {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 9px 10px;
+  border: 1px solid var(--line);
+  border-bottom: 0;
+  border-radius: 10px 10px 0 0;
+  background: #fafbfc;
+}
+
+.skill-document-toolbar > div {
+  display: flex;
+  flex: 0 0 auto;
+  flex-direction: column;
+}
+
+.skill-document-toolbar strong {
+  font-size: 11px;
+}
+
+.skill-document-toolbar small {
+  margin-top: 3px;
+  color: #939aa8;
+  font-size: 9px;
+}
+
+.skill-document-toolbar > span {
+  min-width: 0;
+  overflow: hidden;
+  color: #8b93a2;
+  font: 9px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.skill-document-source {
+  max-height: 360px;
+  margin: 0;
+  overflow: auto;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 0 0 10px 10px;
+  background: #171b24;
+  color: #e7eaf0;
+  font: 10px/1.7 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  tab-size: 2;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.skill-document-source code {
+  font: inherit;
+}
+
+.skill-document-error {
+  padding: 18px 14px;
+  border: 1px solid #efd8d8;
+  border-radius: 10px;
+  background: #fff7f7;
+  text-align: center;
+}
+
+.skill-document-error strong {
+  font-size: 11px;
+}
+
+.skill-document-error p {
+  margin: 7px auto 12px;
+  max-width: 280px;
+  color: #9a5b5b;
+  font-size: 10px;
+  line-height: 1.55;
+}
+
+.detailed-deployment-list article {
+  align-items: flex-start;
+}
+
+.detailed-deployment-list article > div {
+  flex: 1;
+  overflow: hidden;
+}
+
+.detailed-deployment-list small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.detailed-deployment-list em {
+  margin-top: 5px;
+  font-size: 9px;
+  font-style: normal;
+  line-height: 1.4;
+}
+
+.deployment-current {
+  color: var(--green);
+}
+
+.deployment-old {
+  color: var(--amber);
+}
+
+.bundle-membership-dialog {
+  width: min(640px, 100%);
+  max-height: min(720px, calc(100vh - 56px));
+  overflow: auto;
+  padding: 20px;
+  box-shadow: 0 24px 80px rgba(24, 31, 47, .18);
+}
+
+.bundle-membership-dialog .wizard-header p strong {
+  color: #4c5362;
+}
+
+.bundle-membership-list {
+  display: grid;
+  gap: 8px;
+  max-height: 390px;
+  margin-top: 16px;
+  overflow: auto;
+}
+
+.bundle-membership-list > .empty-state {
+  min-height: 230px;
+  border: 1px dashed #dfe2e9;
+  border-radius: 11px;
+}
+
+.bundle-membership-item {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 11px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #fff;
+  cursor: pointer;
+}
+
+.bundle-membership-item:hover {
+  border-color: #d5d9e4;
+  background: #fbfcff;
+}
+
+.bundle-membership-item:has(input:checked) {
+  border-color: #dce2ff;
+  background: #f5f7ff;
+}
+
+.bundle-membership-item.locked {
+  cursor: not-allowed;
+}
+
+.bundle-membership-item input {
+  width: 15px;
+  height: 15px;
+  accent-color: var(--blue);
+}
+
+.bundle-membership-item > span {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+}
+
+.bundle-membership-item strong {
+  overflow: hidden;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.bundle-membership-item small {
+  margin-top: 4px;
+  overflow: hidden;
+  color: #8d95a3;
+  font-size: 9px;
+  line-height: 1.4;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.bundle-membership-item em {
+  color: #8b93a2;
+  font-size: 9px;
+  font-style: normal;
+  white-space: nowrap;
+}
+
+.bundle-membership-item:has(input:checked) em {
+  color: #455ed0;
+}
+
+.bundle-membership-item.locked em {
+  color: var(--amber);
+}
+
+@media (max-width: 760px) {
+  .bundle-membership-dialog {
+    max-height: calc(100vh - 24px);
+    padding: 16px;
+  }
+
+  .bundle-membership-item {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .bundle-membership-item em {
+    grid-column: 2;
+  }
+}
+
+@media (max-width: 420px) {
+  .skill-detail-tabs button {
+    font-size: 9px;
+  }
+
+  .skill-document-toolbar {
+    align-items: stretch;
+    flex-direction: column;
+  }
+}
