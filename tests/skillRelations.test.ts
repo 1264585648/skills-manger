@@ -5,6 +5,7 @@ import { enrichLibrarySkillRelations } from "../src/services/skillRelations.ts";
 import type { Skill } from "../src/types/domain.ts";
 import type { AgentTargetRecord, DiscoveryRootRecord } from "../src/types/discovery.ts";
 import type { BundleRecord, DeploymentRecord } from "../src/types/bundlePlanner.ts";
+import type { SkillGroupRecord } from "../src/types/skillGroups.ts";
 
 const skill: Skill = {
   id: "skill-1",
@@ -20,6 +21,23 @@ const skill: Skill = {
   security: "未发现 scripts/",
   contentHash: "hash-current",
 };
+
+const groups: SkillGroupRecord[] = [
+  {
+    id: "group-b",
+    name: "研发效率",
+    skillIds: ["skill-1"],
+    createdAt: 1,
+    updatedAt: 2,
+  },
+  {
+    id: "group-a",
+    name: "代码质量",
+    skillIds: ["skill-1"],
+    createdAt: 1,
+    updatedAt: 3,
+  },
+];
 
 const bundles: BundleRecord[] = [
   {
@@ -73,14 +91,16 @@ const deployment: DeploymentRecord = {
   updatedAt: 20,
 };
 
-test("enriches Library Skills with real Bundle and deployment relationships", () => {
+test("enriches Library Skills with persisted groups, Bundles and deployments", () => {
   const [enriched] = enrichLibrarySkillRelations([skill], {
+    groups,
     bundles,
     deployments: [deployment],
     roots: [root],
     targets: [target],
   });
 
+  assert.deepEqual(enriched?.groups, ["代码质量", "研发效率"]);
   assert.deepEqual(enriched?.bundles, ["后端开发", "研发通用"]);
   assert.deepEqual(enriched?.targets, ["Claude Code"]);
   assert.equal(enriched?.deployments?.length, 1);
@@ -93,6 +113,7 @@ test("enriches Library Skills with real Bundle and deployment relationships", ()
 
 test("keeps a deployment visible when its Agent metadata is incomplete", () => {
   const [enriched] = enrichLibrarySkillRelations([skill], {
+    groups: [],
     bundles: [],
     deployments: [deployment],
     roots: [],
