@@ -4,6 +4,7 @@ import App from "./App";
 import "./styles.css";
 import "./m2.css";
 import "./workflow.css";
+import "./skills.css";
 
 const root = document.getElementById("root");
 
