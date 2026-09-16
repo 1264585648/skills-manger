@@ -140,8 +140,7 @@ mod tests {
         let content = "---\nname: demo-skill\ndescription: Demo\n---\n\n# Demo\n";
         fs::write(skill.join("SKILL.md"), content).expect("fixture should write");
 
-        let record = read_document_within(&skill, &root, "skill-1")
-            .expect("document should read");
+        let record = read_document_within(&skill, &root, "skill-1").expect("document should read");
         assert_eq!(record.skill_id, "skill-1");
         assert_eq!(record.content, content);
         assert_eq!(record.line_count, 6);
