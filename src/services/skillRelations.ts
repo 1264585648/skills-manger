@@ -11,7 +11,7 @@ import type { SkillGroupRecord } from "../types/skillGroups.ts";
 import { formatTimestamp } from "./formatTimestamp.ts";
 
 export interface SkillRelationContext {
-  groups: SkillGroupRecord[];
+  groups?: SkillGroupRecord[];
   bundles: BundleRecord[];
   deployments: DeploymentRecord[];
   roots: DiscoveryRootRecord[];
@@ -30,7 +30,7 @@ export const enrichLibrarySkillRelations = (
   const bundlesBySkill = new Map<string, string[]>();
   const deploymentsBySkill = new Map<string, SkillDeployment[]>();
 
-  for (const group of context.groups) {
+  for (const group of context.groups ?? []) {
     for (const skillId of group.skillIds) {
       const names = groupsBySkill.get(skillId) ?? [];
       names.push(group.name);
