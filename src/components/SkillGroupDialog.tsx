@@ -21,7 +21,7 @@ interface Props {
   onCancel: () => void;
   onCreate: (name: string) => Promise<SkillGroupRecord>;
   onRename: (group: SkillGroupRecord, name: string) => Promise<SkillGroupRecord>;
-  onDelete: (group: SkillGroupRecord) => Promise<void>;
+  onDelete: (group: SkillGroupRecord) => Promise<boolean>;
   onConfirm?: (groupIds: string[]) => Promise<void> | void;
 }
 
@@ -126,7 +126,8 @@ export function SkillGroupDialog({
     setPendingAction("delete");
     setError(null);
     try {
-      await onDelete(group);
+      const deleted = await onDelete(group);
+      if (!deleted) return;
       setSelectedIds((current) => current.filter((id) => id !== group.id));
       if (editingId === group.id) setEditingId(null);
     } catch (deleteError) {
