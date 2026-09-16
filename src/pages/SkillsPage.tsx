@@ -2,10 +2,13 @@ import { useCallback, useEffect, useMemo, useState, type ChangeEvent } from "rea
 import { confirm } from "@tauri-apps/plugin-dialog";
 import { BundleMembershipDialog } from "../components/BundleMembershipDialog";
 import { ImportWizard } from "../components/ImportWizard";
+import { SkillGroupDialog } from "../components/SkillGroupDialog";
 import { Button, EmptyState, PageHeader, SearchField, StatusPill } from "../components/ui";
+import { applySkillGroups, skillGroupService } from "../services/skillGroupService";
 import { workspaceService, type SkillDocument } from "../services/workspaceService";
 import type { Skill, SkillStatus } from "../types/domain";
 import type { BundleRecord } from "../types/bundlePlanner";
+import type { SkillGroupRecord } from "../types/skillGroups";
 import type { SkillImportPlan } from "../types/import";
 
 const statusMeta: Record<SkillStatus, { label: string; tone: "green" | "amber" | "red" | "blue" | "gray" }> = {
@@ -51,16 +54,21 @@ const scopeLabel = (scope: "user" | "project" | "unknown"): string => {
   return "未知范围";
 };
 
+const sortGroupRecords = (groups: SkillGroupRecord[]): SkillGroupRecord[] =>
+  [...groups].sort((left, right) => left.name.localeCompare(right.name));
+
 type Notice = { tone: "success" | "error"; text: string } | null;
 type SkillsView = "library" | "discovery";
 type StatusFilter = "all" | "updates" | "issues";
 type DetailTab = "overview" | "content" | "deployments" | "technical";
+type GroupDialogMode = "catalog" | "membership" | null;
 
 export function SkillsPage() {
   const [skills, setSkills] = useState<Skill[]>([]);
   const [bundleRecords, setBundleRecords] = useState<BundleRecord[]>([]);
+  const [groupRecords, setGroupRecords] = useState<SkillGroupRecord[]>([]);
   const [query, setQuery] = useState("");
-  const [group, setGroup] = useState("全部");
+  const [groupId, setGroupId] = useState("all");
   const [view, setView] = useState<SkillsView>("library");
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
   const [detailTab, setDetailTab] = useState<DetailTab>("overview");
@@ -74,6 +82,8 @@ export function SkillsPage() {
   const [sourceBusy, setSourceBusy] = useState(false);
   const [editingBundles, setEditingBundles] = useState(false);
   const [bundleBusy, setBundleBusy] = useState(false);
+  const [editingGroups, setEditingGroups] = useState<GroupDialogMode>(null);
+  const [groupBusy, setGroupBusy] = useState(false);
   const [skillDocument, setSkillDocument] = useState<SkillDocument | null>(null);
   const [documentLoading, setDocumentLoading] = useState(false);
   const [documentError, setDocumentError] = useState<string | null>(null);
@@ -82,13 +92,16 @@ export function SkillsPage() {
   const loadSkills = useCallback(async (): Promise<Skill[]> => {
     setLoading(true);
     try {
-      const [items, bundles] = await Promise.all([
+      const [items, bundles, groups] = await Promise.all([
         workspaceService.getSkills(),
         workspaceService.getBundleRecords(),
+        skillGroupService.getGroups(),
       ]);
-      setSkills(items);
+      const groupedItems = applySkillGroups(items, groups);
+      setSkills(groupedItems);
       setBundleRecords(bundles);
-      return items;
+      setGroupRecords(sortGroupRecords(groups));
+      return groupedItems;
     } finally {
       setLoading(false);
     }
@@ -155,7 +168,7 @@ export function SkillsPage() {
       const last = results.at(-1);
       setView("library");
       setStatusFilter("all");
-      setGroup("全部");
+      setGroupId("all");
       setQuery("");
       if (last) setSelectedId(last.skill.id);
       setImportPlan(null);
@@ -215,18 +228,24 @@ export function SkillsPage() {
     () => skills.filter(isDiscoverySkill),
     [skills],
   );
-
-  const groups = useMemo(
-    () => ["全部", ...Array.from(new Set(librarySkills.flatMap((item) => item.groups)))],
-    [librarySkills],
+  const groupOptions = useMemo(
+    () => sortGroupRecords(groupRecords),
+    [groupRecords],
   );
+  const selectedGroupSkillIds = useMemo(() => {
+    if (groupId === "all") return null;
+    const selectedGroup = groupRecords.find((item) => item.id === groupId);
+    return new Set(selectedGroup?.skillIds ?? []);
+  }, [groupId, groupRecords]);
 
   const activeItems = view === "library" ? librarySkills : discoverySkills;
 
   const filtered = useMemo(() => {
     const normalized = query.trim().toLowerCase();
     return activeItems.filter((skill) => {
-      const matchesGroup = view === "discovery" || group === "全部" || skill.groups.includes(group);
+      const matchesGroup = view === "discovery"
+        || groupId === "all"
+        || selectedGroupSkillIds?.has(skill.id) === true;
       const matchesStatus =
         statusFilter === "all" ||
         (statusFilter === "updates" && updateStatuses.has(skill.status)) ||
@@ -251,7 +270,7 @@ export function SkillsPage() {
           .includes(normalized);
       return matchesGroup && matchesStatus && matchesQuery;
     });
-  }, [activeItems, group, query, statusFilter, view]);
+  }, [activeItems, groupId, query, selectedGroupSkillIds, statusFilter, view]);
 
   useEffect(() => {
     setSelectedId((current) => {
@@ -263,6 +282,7 @@ export function SkillsPage() {
   useEffect(() => {
     setDetailTab("overview");
     setEditingBundles(false);
+    setEditingGroups((current) => current === "membership" ? null : current);
   }, [selectedId]);
 
   const selected = filtered.find((skill) => skill.id === selectedId) ?? null;
@@ -353,15 +373,83 @@ export function SkillsPage() {
           ? `组合关系未全部保存；已有 ${savedCount} 个 Bundle 更新成功。${formatError(error, "后续保存失败")}`
           : formatError(error, "保存组合关系失败"),
       });
+      throw error;
     } finally {
       setBundleBusy(false);
+    }
+  };
+
+  const handleCreateGroup = async (name: string): Promise<SkillGroupRecord> => {
+    setGroupBusy(true);
+    try {
+      const created = await skillGroupService.saveGroup({ id: null, name });
+      setGroupRecords((current) => sortGroupRecords([...current, created]));
+      return created;
+    } finally {
+      setGroupBusy(false);
+    }
+  };
+
+  const handleRenameGroup = async (
+    group: SkillGroupRecord,
+    name: string,
+  ): Promise<SkillGroupRecord> => {
+    setGroupBusy(true);
+    try {
+      const updated = await skillGroupService.saveGroup({ id: group.id, name });
+      setGroupRecords((current) => sortGroupRecords(
+        current.map((item) => item.id === updated.id ? updated : item),
+      ));
+      await loadSkills();
+      return updated;
+    } finally {
+      setGroupBusy(false);
+    }
+  };
+
+  const handleDeleteGroup = async (group: SkillGroupRecord): Promise<boolean> => {
+    const accepted = await confirm(
+      `删除分组“${group.name}”？其中的 ${group.skillIds.length} 个 Skill 不会被删除，Bundle 与部署也不会变化。`,
+    );
+    if (!accepted) return false;
+
+    setGroupBusy(true);
+    try {
+      await skillGroupService.deleteGroup(group.id);
+      if (groupId === group.id) setGroupId("all");
+      await loadSkills();
+      return true;
+    } finally {
+      setGroupBusy(false);
+    }
+  };
+
+  const handleSaveGroupMembership = async (selectedGroupIds: string[]): Promise<void> => {
+    if (!selected || selectedIsDiscovery) return;
+
+    setGroupBusy(true);
+    setNotice(null);
+    try {
+      const groups = await skillGroupService.setSkillGroups(selected.id, selectedGroupIds);
+      setGroupRecords(sortGroupRecords(groups));
+      await loadSkills();
+      setEditingGroups(null);
+      setNotice({
+        tone: "success",
+        text: `已更新 ${selected.name} 的分组关系。Bundle 与部署位置保持不变。`,
+      });
+    } catch (error) {
+      setNotice({ tone: "error", text: formatError(error, "保存分组关系失败") });
+      throw error;
+    } finally {
+      setGroupBusy(false);
     }
   };
 
   const changeView = (next: SkillsView): void => {
     setView(next);
     setStatusFilter("all");
-    setGroup("全部");
+    setGroupId("all");
   };
 
   return <section className="page skills-page">
@@ -413,7 +501,7 @@ export function SkillsPage() {
       </div>
       <p>
         {view === "library"
-          ? "技能库保存受管资产；加入组合或同步时才会影响部署。"
+          ? "技能库保存受管资产；分组只用于整理，加入组合或同步时才会影响部署。"
           : "发现结果保持只读；导入会复制到技能库，不会修改原目录。"}
       </p>
     </div>
@@ -424,18 +512,26 @@ export function SkillsPage() {
           <SearchField
             value={query}
             onChange={setQuery}
-            placeholder={view === "library" ? "搜索名称、用途、来源或部署位置…" : "搜索发现的 Skill 或目录…"}
+            placeholder={view === "library" ? "搜索名称、用途、分组、来源或部署位置…" : "搜索发现的 Skill 或目录…"}
           />
           {view === "library" ? (
-            <label className="skills-select">
-              <span>分组</span>
-              <select
-                value={group}
-                onChange={(event: ChangeEvent<HTMLSelectElement>) => setGroup(event.target.value)}
-              >
-                {groups.map((item) => <option key={item} value={item}>{item}</option>)}
-              </select>
-            </label>
+            <div className="skills-group-controls">
+              <label className="skills-select">
+                <span>分组</span>
+                <select
+                  value={groupId}
+                  onChange={(event: ChangeEvent<HTMLSelectElement>) => setGroupId(event.target.value)}
+                >
+                  <option value="all">全部</option>
+                  {groupOptions.map((item) => (
+                    <option key={item.id} value={item.id}>
+                      {item.name} · {item.skillIds.length}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <Button variant="ghost" onClick={() => setEditingGroups("catalog")}>管理分组</Button>
+            </div>
           ) : null}
           <Button variant="ghost" disabled={loading} onClick={() => void handleRefresh()}>
             {loading ? "读取中…" : "刷新列表"}
@@ -579,14 +675,14 @@ export function SkillsPage() {
               <div className="skill-tab-panel" role="tabpanel">
                 <section className="inspector-section">
                   <span className="section-label">关系</span>
-                  {selected.groups.length > 0 ? (
-                    <div className="skill-relation-block">
-                      <span>分组</span>
-                      <div className="skill-chip-list">
-                        {selected.groups.map((item) => <small key={item}>{item}</small>)}
-                      </div>
+                  <div className="skill-relation-block">
+                    <span>分组</span>
+                    <div className="skill-chip-list">
+                      {selected.groups.length > 0
+                        ? selected.groups.map((item) => <small key={item}>{item}</small>)
+                        : <em>{selectedIsDiscovery ? "不适用于发现实例" : "未分组"}</em>}
                     </div>
-                  ) : null}
+                  </div>
                   <div className="skill-relation-block">
                     <span>组合</span>
                     <div className="skill-chip-list">
@@ -718,9 +814,14 @@ export function SkillsPage() {
                   {preparingImport ? "读取中…" : "导入技能库"}
                 </Button>
               ) : (
-                <Button onClick={() => setEditingBundles(true)}>
-                  {selected.bundles.length > 0 ? "管理所属组合" : "加入组合"}
-                </Button>
+                <>
+                  <Button onClick={() => setEditingGroups("membership")}>
+                    {selected.groups.length > 0 ? "管理所属分组" : "加入分组"}
+                  </Button>
+                  <Button onClick={() => setEditingBundles(true)}>
+                    {selected.bundles.length > 0 ? "管理所属组合" : "加入组合"}
+                  </Button>
+                </>
               )}
               {selected.trackedSourceId ? (
                 <Button disabled={sourceBusy} onClick={() => void handleCheckSource(selected.trackedSourceId!)}>
@@ -760,6 +861,20 @@ export function SkillsPage() {
         skill={selected}
         onCancel={() => setEditingBundles(false)}
         onConfirm={(bundleIds) => void handleSaveBundleMembership(bundleIds)}
+      />
+    ) : null}
+
+    {editingGroups && (editingGroups === "catalog" || (selected && !selectedIsDiscovery)) ? (
+      <SkillGroupDialog
+        busy={groupBusy}
+        groups={groupRecords}
+        mode={editingGroups}
+        skill={editingGroups === "membership" ? selected ?? undefined : undefined}
+        onCancel={() => setEditingGroups(null)}
+        onCreate={handleCreateGroup}
+        onDelete={handleDeleteGroup}
+        onRename={handleRenameGroup}
+        onConfirm={editingGroups === "membership" ? handleSaveGroupMembership : undefined}
       />
     ) : null}
   </section>;
