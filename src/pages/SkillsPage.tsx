@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useMemo, useState, type ChangeEvent } from "react";
 import { confirm } from "@tauri-apps/plugin-dialog";
+import { BundleMembershipDialog } from "../components/BundleMembershipDialog";
 import { ImportWizard } from "../components/ImportWizard";
 import { Button, EmptyState, PageHeader, SearchField, StatusPill } from "../components/ui";
-import { workspaceService } from "../services/workspaceService";
+import { workspaceService, type SkillDocument } from "../services/workspaceService";
 import type { Skill, SkillStatus } from "../types/domain";
+import type { BundleRecord } from "../types/bundlePlanner";
 import type { SkillImportPlan } from "../types/import";
 
 const statusMeta: Record<SkillStatus, { label: string; tone: "green" | "amber" | "red" | "blue" | "gray" }> = {
@@ -37,13 +39,26 @@ const isDiscoverySkill = (skill: Skill): boolean =>
 const formatError = (error: unknown, fallback: string): string =>
   error instanceof Error ? error.message : fallback;
 
+const formatBytes = (value: number): string => {
+  if (value < 1024) return `${value} B`;
+  if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`;
+  return `${(value / (1024 * 1024)).toFixed(1)} MB`;
+};
+
+const scopeLabel = (scope: "user" | "project" | "unknown"): string => {
+  if (scope === "user") return "用户范围";
+  if (scope === "project") return "项目范围";
+  return "未知范围";
+};
+
 type Notice = { tone: "success" | "error"; text: string } | null;
 type SkillsView = "library" | "discovery";
 type StatusFilter = "all" | "updates" | "issues";
-type DetailTab = "overview" | "deployments" | "technical";
+type DetailTab = "overview" | "content" | "deployments" | "technical";
 
 export function SkillsPage() {
   const [skills, setSkills] = useState<Skill[]>([]);
+  const [bundleRecords, setBundleRecords] = useState<BundleRecord[]>([]);
   const [query, setQuery] = useState("");
   const [group, setGroup] = useState("全部");
   const [view, setView] = useState<SkillsView>("library");
@@ -57,12 +72,22 @@ export function SkillsPage() {
   const [importPlan, setImportPlan] = useState<SkillImportPlan | null>(null);
   const [notice, setNotice] = useState<Notice>(null);
   const [sourceBusy, setSourceBusy] = useState(false);
+  const [editingBundles, setEditingBundles] = useState(false);
+  const [bundleBusy, setBundleBusy] = useState(false);
+  const [skillDocument, setSkillDocument] = useState<SkillDocument | null>(null);
+  const [documentLoading, setDocumentLoading] = useState(false);
+  const [documentError, setDocumentError] = useState<string | null>(null);
+  const [documentReloadKey, setDocumentReloadKey] = useState(0);
 
   const loadSkills = useCallback(async (): Promise<Skill[]> => {
     setLoading(true);
     try {
-      const items = await workspaceService.getSkills();
+      const [items, bundles] = await Promise.all([
+        workspaceService.getSkills(),
+        workspaceService.getBundleRecords(),
+      ]);
       setSkills(items);
+      setBundleRecords(bundles);
       return items;
     } finally {
       setLoading(false);
@@ -79,7 +104,7 @@ export function SkillsPage() {
     setNotice(null);
     try {
       await loadSkills();
-      setNotice({ tone: "success", text: "技能列表已重新读取。" });
+      setNotice({ tone: "success", text: "技能列表及关系数据已重新读取。" });
     } catch (error) {
       setNotice({ tone: "error", text: formatError(error, "重新读取失败") });
     }
@@ -216,6 +241,10 @@ export function SkillsPage() {
           ...skill.groups,
           ...skill.bundles,
           ...skill.targets,
+          ...(skill.deployments ?? []).flatMap((deployment) => [
+            deployment.rootPath,
+            deployment.destinationPath,
+          ]),
         ]
           .join(" ")
           .toLowerCase()
@@ -233,12 +262,101 @@ export function SkillsPage() {
 
   useEffect(() => {
     setDetailTab("overview");
+    setEditingBundles(false);
   }, [selectedId]);
 
   const selected = filtered.find((skill) => skill.id === selectedId) ?? null;
   const selectedIsDiscovery = selected ? isDiscoverySkill(selected) : false;
   const updateCount = librarySkills.filter((skill) => updateStatuses.has(skill.status)).length;
   const issueCount = librarySkills.filter((skill) => issueStatuses.has(skill.status)).length;
+
+  useEffect(() => {
+    if (detailTab !== "content" || !selected) return undefined;
+
+    let cancelled = false;
+    setSkillDocument(null);
+    setDocumentError(null);
+    setDocumentLoading(true);
+    void workspaceService.getSkillDocument(selected.id)
+      .then((document) => {
+        if (!cancelled) setSkillDocument(document);
+      })
+      .catch((error) => {
+        if (!cancelled) setDocumentError(formatError(error, "读取 SKILL.md 失败"));
+      })
+      .finally(() => {
+        if (!cancelled) setDocumentLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [detailTab, documentReloadKey, selected]);
+
+  const handleSaveBundleMembership = async (selectedBundleIds: string[]): Promise<void> => {
+    if (!selected || selectedIsDiscovery) return;
+
+    const targetIds = new Set(selectedBundleIds);
+    const currentIds = new Set(
+      bundleRecords
+        .filter((bundle) => bundle.items.some((item) => item.skillId === selected.id))
+        .map((bundle) => bundle.id),
+    );
+    const changed = bundleRecords.filter((bundle) =>
+      targetIds.has(bundle.id) !== currentIds.has(bundle.id),
+    );
+    if (changed.length === 0) {
+      setEditingBundles(false);
+      return;
+    }
+
+    setBundleBusy(true);
+    setNotice(null);
+    let savedCount = 0;
+    try {
+      for (const bundle of changed) {
+        const shouldInclude = targetIds.has(bundle.id);
+        const sortedItems = [...bundle.items]
+          .sort((left, right) => left.position - right.position);
+        const nextItems = shouldInclude
+          ? sortedItems.some((item) => item.skillId === selected.id)
+            ? sortedItems
+            : [...sortedItems, {
+              skillId: selected.id,
+              mode: "required" as const,
+              position: sortedItems.length,
+            }]
+          : sortedItems.filter((item) => item.skillId !== selected.id);
+
+        await workspaceService.saveBundle({
+          id: bundle.id,
+          name: bundle.name,
+          description: bundle.description,
+          items: nextItems.map((item) => ({
+            skillId: item.skillId,
+            mode: item.mode,
+          })),
+        });
+        savedCount += 1;
+      }
+
+      await loadSkills();
+      setEditingBundles(false);
+      setNotice({
+        tone: "success",
+        text: `已更新 ${savedCount} 个 Bundle。组合定义已保存，部署位置未自动修改。`,
+      });
+    } catch (error) {
+      setNotice({
+        tone: "error",
+        text: savedCount > 0
+          ? `组合关系未全部保存；已有 ${savedCount} 个 Bundle 更新成功。${formatError(error, "后续保存失败")}`
+          : formatError(error, "保存组合关系失败"),
+      });
+    } finally {
+      setBundleBusy(false);
+    }
+  };
 
   const changeView = (next: SkillsView): void => {
     setView(next);
@@ -379,9 +497,10 @@ export function SkillsPage() {
           ) : filtered.map((skill) => {
             const meta = statusMeta[skill.status];
             const discovery = isDiscoverySkill(skill);
+            const deploymentCount = skill.deployments?.length ?? 0;
             const placement = discovery
               ? skill.targets[0] ?? skill.source
-              : skill.targets.length > 0 ? `${skill.targets.length} 个位置` : "暂无记录";
+              : deploymentCount > 0 ? `${deploymentCount} 个位置` : "暂无部署";
             return (
               <button
                 className={selected?.id === skill.id ? "skill-row selected" : "skill-row"}
@@ -406,6 +525,7 @@ export function SkillsPage() {
       <aside className="panel-surface inspector skill-inspector">
         {selected ? (() => {
           const meta = statusMeta[selected.status];
+          const deployments = selected.deployments ?? [];
           return <>
             <div className="skill-inspector-title">
               <div className="skill-title-row">
@@ -424,7 +544,7 @@ export function SkillsPage() {
               <p>{statusDescription[selected.status]}</p>
             </div>
 
-            <div className="skill-detail-tabs" role="tablist" aria-label="Skill 详情">
+            <div className="skill-detail-tabs skill-detail-tabs-four" role="tablist" aria-label="Skill 详情">
               <button
                 className={detailTab === "overview" ? "active" : ""}
                 type="button"
@@ -432,6 +552,13 @@ export function SkillsPage() {
                 aria-selected={detailTab === "overview"}
                 onClick={() => setDetailTab("overview")}
               >概览</button>
+              <button
+                className={detailTab === "content" ? "active" : ""}
+                type="button"
+                role="tab"
+                aria-selected={detailTab === "content"}
+                onClick={() => setDetailTab("content")}
+              >内容</button>
               <button
                 className={detailTab === "deployments" ? "active" : ""}
                 type="button"
@@ -445,27 +572,35 @@ export function SkillsPage() {
                 role="tab"
                 aria-selected={detailTab === "technical"}
                 onClick={() => setDetailTab("technical")}
-              >技术信息</button>
+              >技术</button>
             </div>
 
             {detailTab === "overview" ? (
               <div className="skill-tab-panel" role="tabpanel">
                 <section className="inspector-section">
-                  <span className="section-label">整理与关系</span>
-                  <div className="skill-relation-block">
-                    <span>分组</span>
-                    <div className="skill-chip-list">
-                      {selected.groups.length > 0
-                        ? selected.groups.map((item) => <small key={item}>{item}</small>)
-                        : <em>暂无记录</em>}
+                  <span className="section-label">关系</span>
+                  {selected.groups.length > 0 ? (
+                    <div className="skill-relation-block">
+                      <span>分组</span>
+                      <div className="skill-chip-list">
+                        {selected.groups.map((item) => <small key={item}>{item}</small>)}
+                      </div>
                     </div>
-                  </div>
+                  ) : null}
                   <div className="skill-relation-block">
                     <span>组合</span>
                     <div className="skill-chip-list">
                       {selected.bundles.length > 0
                         ? selected.bundles.map((item) => <small key={item}>{item}</small>)
-                        : <em>暂无记录</em>}
+                        : <em>未加入组合</em>}
+                    </div>
+                  </div>
+                  <div className="skill-relation-block">
+                    <span>部署</span>
+                    <div className="skill-chip-list">
+                      {deployments.length > 0
+                        ? selected.targets.map((item) => <small key={item}>{item}</small>)
+                        : <em>{selectedIsDiscovery ? "只读发现" : "暂无部署记录"}</em>}
                     </div>
                   </div>
                 </section>
@@ -485,23 +620,70 @@ export function SkillsPage() {
               </div>
             ) : null}
 
+            {detailTab === "content" ? (
+              <div className="skill-tab-panel skill-content-panel" role="tabpanel">
+                {documentLoading ? (
+                  <div className="compact-empty">
+                    <strong>正在读取 SKILL.md</strong>
+                    <p>只读取已登记路径中的说明文件，不会执行脚本或加载远程资源。</p>
+                  </div>
+                ) : documentError ? (
+                  <div className="skill-document-error">
+                    <strong>无法读取内容</strong>
+                    <p>{documentError}</p>
+                    <Button onClick={() => setDocumentReloadKey((value) => value + 1)}>重试</Button>
+                  </div>
+                ) : skillDocument ? (
+                  <>
+                    <div className="skill-document-toolbar">
+                      <div>
+                        <strong>SKILL.md</strong>
+                        <small>{skillDocument.lineCount} 行 · {formatBytes(skillDocument.sizeBytes)}</small>
+                      </div>
+                      <span title={skillDocument.path}>{skillDocument.path}</span>
+                    </div>
+                    <pre className="skill-document-source"><code>{skillDocument.content}</code></pre>
+                    <p className="technical-note">内容以纯文本只读显示；预览不会执行其中的命令、脚本或链接。</p>
+                  </>
+                ) : null}
+              </div>
+            ) : null}
+
             {detailTab === "deployments" ? (
               <div className="skill-tab-panel" role="tabpanel">
                 <section className="inspector-section">
                   <span className="section-label">{selectedIsDiscovery ? "发现于" : "部署记录"}</span>
-                  {selected.targets.length > 0 ? (
+                  {deployments.length > 0 ? (
+                    <div className="deployment-list detailed-deployment-list">
+                      {deployments.map((deployment) => {
+                        const matchesCurrent = deployment.deployedHash === selected.contentHash;
+                        return (
+                          <article key={deployment.id} title={deployment.rootPath}>
+                            <span className="deployment-mark">{deployment.agentName.slice(0, 1).toUpperCase()}</span>
+                            <div>
+                              <strong>{deployment.agentName} · {scopeLabel(deployment.scope)}</strong>
+                              <small title={deployment.destinationPath}>{deployment.destinationPath}</small>
+                              <em className={matchesCurrent ? "deployment-current" : "deployment-old"}>
+                                {matchesCurrent ? "记录对应当前技能库版本" : "记录对应旧版本"} · {deployment.updatedAt}
+                              </em>
+                            </div>
+                          </article>
+                        );
+                      })}
+                    </div>
+                  ) : selectedIsDiscovery && selected.targets.length > 0 ? (
                     <div className="deployment-list">
                       {selected.targets.map((target) => (
                         <article key={target}>
                           <span className="deployment-mark">{target.slice(0, 1).toUpperCase()}</span>
-                          <div><strong>{target}</strong><small>{selectedIsDiscovery ? "只读发现实例" : "已记录的部署位置"}</small></div>
+                          <div><strong>{target}</strong><small>只读发现实例，尚未建立部署记录</small></div>
                         </article>
                       ))}
                     </div>
                   ) : (
                     <div className="compact-empty">
                       <strong>暂无部署记录</strong>
-                      <p>当前数据没有可展示的位置；可在 Bundle 与 Sync 中查看组合及部署计划。</p>
+                      <p>将 Skill 加入 Bundle 后，可在 Sync 中选择目标并生成部署计划。</p>
                     </div>
                   )}
                   {selected.sourcePath ? <code className="skill-path" title={selected.sourcePath}>{selected.sourcePath}</code> : null}
@@ -535,7 +717,11 @@ export function SkillsPage() {
                 >
                   {preparingImport ? "读取中…" : "导入技能库"}
                 </Button>
-              ) : null}
+              ) : (
+                <Button onClick={() => setEditingBundles(true)}>
+                  {selected.bundles.length > 0 ? "管理所属组合" : "加入组合"}
+                </Button>
+              )}
               {selected.trackedSourceId ? (
                 <Button disabled={sourceBusy} onClick={() => void handleCheckSource(selected.trackedSourceId!)}>
                   {sourceBusy ? "检查中…" : "检查来源更新"}
@@ -553,7 +739,7 @@ export function SkillsPage() {
             </div>
           </>;
         })() : (
-          <EmptyState title="选择一个 Skill" body="查看用途、关系、部署位置与技术信息。" />
+          <EmptyState title="选择一个 Skill" body="查看用途、内容、关系、部署位置与技术信息。" />
         )}
       </aside>
     </div>
@@ -564,6 +750,16 @@ export function SkillsPage() {
         plan={importPlan}
         onCancel={() => setImportPlan(null)}
         onConfirm={() => void handleConfirmImport()}
+      />
+    ) : null}
+
+    {editingBundles && selected && !selectedIsDiscovery ? (
+      <BundleMembershipDialog
+        busy={bundleBusy}
+        bundles={bundleRecords}
+        skill={selected}
+        onCancel={() => setEditingBundles(false)}
+        onConfirm={(bundleIds) => void handleSaveBundleMembership(bundleIds)}
       />
     ) : null}
   </section>;
