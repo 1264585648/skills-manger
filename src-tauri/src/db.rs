@@ -100,6 +100,96 @@ pub struct LinkRecord {
 
 // ---------------------------------------------------------------- schema
 
+/// Layout version written into `schema_meta` by [`Database::initialize`].
+///
+/// Version 1 was produced by the pre-rebuild application generation: it stored an
+/// incompatible `agent_targets` shape (extra NOT NULL columns such as
+/// `capabilities_json`), keyed `skill_tags` by `skill_id`, and carried a dozen
+/// tables for features that no longer exist. Databases at an older version are
+/// reset on open: every row they hold is either dead (legacy features) or
+/// regenerable (the agent catalog re-registers itself on every start, and
+/// discovery re-scans on demand).
+const SCHEMA_VERSION: &str = "2";
+
+/// Tables owned by the current layout, in dependency-safe drop order.
+const TABLE_NAMES: &[&str] = &[
+    "links",
+    "skill_notes",
+    "skill_tags",
+    "skill_groups",
+    "tags",
+    "groups",
+    "skill_instances",
+    "discovery_roots",
+    "agent_targets",
+];
+
+/// Tables that only ever existed in the pre-rebuild layout.
+const LEGACY_TABLE_NAMES: &[&str] = &[
+    "apply_operation_items",
+    "apply_operations",
+    "apply_previous_records",
+    "agent_center_records",
+    "bundle_items",
+    "bundles",
+    "counters",
+    "deployments",
+    "git_sources",
+    "skill_sources",
+    "skill_tracking",
+    "skills",
+    "sync_plans",
+];
+
+/// Reset a database that was laid out by an older application generation.
+///
+/// Fresh files contain no tables yet and are left untouched; databases already at
+/// [`SCHEMA_VERSION`] keep their rows. Everything else (the pre-rebuild layout) is
+/// dropped and recreated by the `CREATE TABLE IF NOT EXISTS` batch that follows.
+fn reset_outdated_database(connection: &Connection) -> Result<(), AppError> {
+    let tables = table_names(connection)?;
+    if tables.is_empty() {
+        // Brand-new database file: nothing to migrate.
+        return Ok(());
+    }
+    if stored_schema_version(connection)?.as_deref() == Some(SCHEMA_VERSION) {
+        return Ok(());
+    }
+
+    // Foreign keys are re-enabled below; `connect` turns them on for every session.
+    connection.execute_batch("PRAGMA foreign_keys = OFF;")?;
+    for name in TABLE_NAMES.iter().chain(LEGACY_TABLE_NAMES) {
+        connection.execute(&format!("DROP TABLE IF EXISTS {name}"), [])?;
+    }
+    connection.execute_batch("PRAGMA foreign_keys = ON;")?;
+    Ok(())
+}
+
+fn stored_schema_version(connection: &Connection) -> Result<Option<String>, AppError> {
+    if !table_names(connection)?
+        .iter()
+        .any(|name| name == "schema_meta")
+    {
+        return Ok(None);
+    }
+    connection
+        .query_row(
+            "SELECT value FROM schema_meta WHERE key = 'schema_version'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(AppError::from)
+}
+
+fn table_names(connection: &Connection) -> Result<Vec<String>, AppError> {
+    let mut statement = connection.prepare(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'",
+    )?;
+    let names = statement.query_map([], |row| row.get::<_, String>(0))?;
+    names.collect::<Result<Vec<_>, _>>().map_err(AppError::from)
+}
+
 impl Database {
     pub fn initialize(path: impl AsRef<Path>) -> Result<Self, AppError> {
         let database = Self {
@@ -107,6 +197,7 @@ impl Database {
         };
 
         let connection = database.connect()?;
+        reset_outdated_database(&connection)?;
         connection.execute_batch(
             "
             PRAGMA foreign_keys = ON;
@@ -214,7 +305,7 @@ impl Database {
             );
 
             INSERT INTO schema_meta (key, value)
-            VALUES ('schema_version', '1')
+            VALUES ('schema_version', '2')
             ON CONFLICT(key) DO UPDATE SET value = excluded.value;
 
             INSERT OR IGNORE INTO tags (id, name, is_system, created_at, updated_at)
@@ -824,6 +915,108 @@ mod tests {
             is_default: false,
             last_warning: None,
         }
+    }
+
+    #[test]
+    fn pre_rebuild_database_is_reset_to_the_current_layout() {
+        let directory = test_root("legacy-migration");
+        fs::create_dir_all(&directory).expect("test directory should exist");
+        let path = directory.join("skills.sqlite3");
+
+        // Simulate the pre-rebuild layout: schema_version 1, agent_targets with the
+        // extra NOT NULL capabilities_json column, skill_tags keyed by skill_id, and
+        // legacy feature tables carrying rows.
+        {
+            let connection = rusqlite::Connection::open(&path).expect("legacy file should open");
+            connection
+                .execute_batch(
+                    "
+                    CREATE TABLE schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+                    CREATE TABLE agent_targets (
+                        id TEXT PRIMARY KEY,
+                        name TEXT NOT NULL,
+                        provider TEXT NOT NULL,
+                        capabilities_json TEXT NOT NULL,
+                        detected INTEGER NOT NULL,
+                        version TEXT,
+                        updated_at INTEGER NOT NULL
+                    );
+                    CREATE TABLE skill_tags (
+                        skill_id TEXT NOT NULL,
+                        tag_id TEXT NOT NULL,
+                        PRIMARY KEY(skill_id, tag_id)
+                    );
+                    CREATE TABLE bundles (id TEXT PRIMARY KEY, name TEXT NOT NULL);
+                    INSERT INTO schema_meta (key, value) VALUES ('schema_version', '1');
+                    INSERT INTO agent_targets
+                        (id, name, provider, capabilities_json, detected, updated_at)
+                        VALUES ('legacy-agent', 'Legacy', 'Old', '[]', 1, 1);
+                    INSERT INTO bundles (id, name) VALUES ('b1', 'legacy bundle');
+                    ",
+                )
+                .expect("legacy layout should be created");
+        }
+
+        let db = Database::initialize(&path).expect("initialize should reset the legacy database");
+        let now = unix_timestamp().expect("clock should be valid");
+
+        // The exact write that crashed the desktop app before this migration.
+        db.upsert_agent_target(&target(), now)
+            .expect("target should persist on a reset database");
+
+        let connection = db.connect().expect("connection should open");
+        assert_eq!(
+            stored_schema_version(&connection).expect("version should be readable"),
+            Some(SCHEMA_VERSION.to_string()),
+            "schema version should be bumped"
+        );
+        let tables = table_names(&connection).expect("tables should be readable");
+        assert!(
+            !tables.contains(&"bundles".to_string()),
+            "legacy tables should be dropped, got {tables:?}"
+        );
+        let agent_columns: Vec<String> = connection
+            .prepare("PRAGMA table_info(agent_targets)")
+            .and_then(|mut statement| {
+                statement
+                    .query_map([], |row| row.get::<_, String>(1))?
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .expect("agent_targets columns should be readable");
+        assert!(
+            !agent_columns.contains(&"capabilities_json".to_string()),
+            "agent_targets should be recreated without legacy columns, got {agent_columns:?}"
+        );
+    }
+
+    #[test]
+    fn reinitialize_keeps_current_schema_data() {
+        let directory = test_root("reinitialize");
+        fs::create_dir_all(&directory).expect("test directory should exist");
+        let path = directory.join("skills.sqlite3");
+
+        let db = Database::initialize(&path).expect("db should open");
+        let now = unix_timestamp().expect("clock should be valid");
+        db.upsert_agent_target(&target(), now)
+            .expect("target should persist");
+        db.upsert_group(
+            &GroupDraft {
+                id: None,
+                name: "催收工具".to_string(),
+            },
+            now,
+        )
+        .expect("group should persist");
+        drop(db);
+
+        let db = Database::initialize(&path).expect("re-initialize should succeed");
+        let groups = db.list_groups().expect("groups should be listed");
+        assert!(
+            groups.iter().any(|group| group.name == "催收工具"),
+            "governance data must survive re-initialization, got {groups:?}"
+        );
+        db.upsert_agent_target(&target(), now)
+            .expect("target write should still work after re-initialize");
     }
 
     #[test]
