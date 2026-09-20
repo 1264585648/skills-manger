@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import type { ButtonHTMLAttributes, ReactNode } from "react";
+import type { ButtonHTMLAttributes, ReactNode, RefObject } from "react";
 
 type Tone = "green" | "amber" | "red" | "blue" | "gray";
 
@@ -15,16 +15,28 @@ export function PageHeader({ title, subtitle, actions }: { title: string; subtit
   return <header className="page-header"><div><h1>{title}</h1><p>{subtitle}</p></div>{actions ? <div className="page-actions">{actions}</div> : null}</header>;
 }
 
-export function SearchField({ value, onChange, placeholder }: { value: string; onChange: (value: string) => void; placeholder: string }) {
-  return <label className="search-field"><span aria-hidden="true">⌕</span><input value={value} onChange={(event) => onChange(event.target.value)} placeholder={placeholder} /></label>;
+export function SearchField({ value, onChange, placeholder, inputRef }: { value: string; onChange: (value: string) => void; placeholder: string; inputRef?: RefObject<HTMLInputElement | null> }) {
+  return (
+    <label className="search-field">
+      <span aria-hidden="true">⌕</span>
+      <input ref={inputRef} value={value} onChange={(event) => onChange(event.target.value)} placeholder={placeholder} />
+    </label>
+  );
 }
 
 export function Toggle({ checked, onChange }: { checked: boolean; onChange: (checked: boolean) => void }) {
   return <button className={`toggle ${checked ? "toggle-on" : ""}`} type="button" role="switch" aria-checked={checked} onClick={() => onChange(!checked)}><span /></button>;
 }
 
-export function EmptyState({ title, body }: { title: string; body: string }) {
-  return <div className="empty-state"><div className="empty-icon">◇</div><strong>{title}</strong><p>{body}</p></div>;
+export function EmptyState({ title, body, action }: { title: string; body: string; action?: ReactNode }) {
+  return (
+    <div className="empty-state">
+      <div className="empty-icon">◇</div>
+      <strong>{title}</strong>
+      <p>{body}</p>
+      {action}
+    </div>
+  );
 }
 
 interface ErrorNoticeProps {
