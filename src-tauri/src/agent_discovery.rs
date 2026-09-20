@@ -244,8 +244,10 @@ fn matches_project_convention(agent: &AgentDefinition, canonical: &Path) -> bool
 
 /// Scan every enabled root and refresh the instance cache.
 pub fn scan_all(db: &Database, timestamp: i64) -> Result<ScanSnapshot, AppError> {
-    let mut warnings = ensure_default_user_roots(db, timestamp)?;
+    // Targets first: discovery_roots.agent_id references agent_targets(id),
+    // so a fresh database would fail the foreign key otherwise.
     ensure_targets_registered(db, timestamp)?;
+    let mut warnings = ensure_default_user_roots(db, timestamp)?;
 
     let roots = db.list_discovery_roots()?;
     for root in &roots {
@@ -522,6 +524,24 @@ mod tests {
             .list_skill_instances()
             .expect("instances should list");
         assert_eq!(instances[0].state, "unmanaged");
+
+        drop(database);
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn scan_all_on_fresh_database_registers_targets_first() {
+        let directory = test_root("fresh-scan");
+        fs::create_dir_all(&directory).expect("test directory should exist");
+        let database =
+            Database::initialize(directory.join("skills.sqlite3")).expect("db should open");
+        let now = unix_timestamp().expect("clock should be valid");
+
+        // Fresh database, no targets registered yet: scan_all must register the
+        // agent targets before any discovery root is written, otherwise the
+        // discovery_roots foreign key fails on the very first scan.
+        let snapshot = scan_all(&database, now).expect("fresh scan should succeed");
+        assert!(!snapshot.targets.is_empty());
 
         drop(database);
         let _ = fs::remove_dir_all(directory);
