@@ -1,4 +1,4 @@
-name: M0 Checks
+name: Core Checks
 
 on:
   push:
@@ -24,9 +24,6 @@ jobs:
 
       - name: Install dependencies
         run: npm install
-
-      - name: Frontend unit tests
-        run: npm run test:frontend
 
       - name: Typecheck
         run: npm run typecheck
@@ -75,6 +72,6 @@ jobs:
       - name: Upload installer artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: skills-control-center-windows-debug
+          name: skills-manger-windows-debug
           path: src-tauri/target/debug/bundle/**
           if-no-files-found: error

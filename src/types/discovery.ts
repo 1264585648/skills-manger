@@ -5,10 +5,8 @@ export interface AgentTargetRecord {
   id: string;
   name: string;
   provider: string;
-  capabilities: string[];
   detected: boolean;
   executablePath: string | null;
-  version: string | null;
   lastWarning: string | null;
   lastScannedAt: number | null;
 }
@@ -39,9 +37,44 @@ export interface SkillInstanceRecord {
   lastDiscoveredAt: number;
 }
 
-export interface AgentDiscoverySnapshot {
-  target: AgentTargetRecord;
+export interface ScanSnapshot {
+  targets: AgentTargetRecord[];
   roots: DiscoveryRootRecord[];
   instances: SkillInstanceRecord[];
   warnings: string[];
+}
+
+export interface GroupRecord {
+  id: string;
+  name: string;
+  skillCount: number;
+}
+
+export interface TagRecord {
+  id: string;
+  name: string;
+  isSystem: boolean;
+  skillCount: number;
+}
+
+export interface SkillNoteRecord {
+  skillPath: string;
+  note: string;
+  updatedAt: number;
+}
+
+export interface LinkRecord {
+  id: string;
+  skillPath: string;
+  skillName: string;
+  targetRootId: string;
+  targetAgentId: string;
+  targetRootPath: string;
+  linkPath: string;
+  createdAt: number;
+}
+
+export interface LinkOutcome {
+  link: LinkRecord;
+  created: boolean;
 }

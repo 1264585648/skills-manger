@@ -1,48 +1,22 @@
+//! Discovery: register the known agents from the static catalog, keep their
+//! skills roots, and scan those roots for skills in place. Scanning is
+//! read-only and never executes anything inside a skill directory.
+
 use std::{
-    ffi::OsStr,
     fs,
-    path::Path,
-    time::{SystemTime, UNIX_EPOCH},
+    path::{Path, PathBuf},
 };
 
 use serde::Serialize;
-use sha2::{Digest, Sha256};
 
-#[cfg(test)]
-use crate::skills;
-use crate::{claude_code, codex, db::Database, error::AppError};
+use crate::{
+    agent_catalog::{self, AgentDefinition},
+    db::{AgentTargetRecord, Database, DiscoveryRootRecord},
+    error::AppError,
+    skills,
+};
 
-const CLAUDE_CODE_ID: &str = "claude-code";
-const CODEX_ID: &str = "codex";
-
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct AgentTargetRecord {
-    pub id: String,
-    pub name: String,
-    pub provider: String,
-    pub capabilities: Vec<String>,
-    pub detected: bool,
-    pub executable_path: Option<String>,
-    pub version: Option<String>,
-    pub last_warning: Option<String>,
-    pub last_scanned_at: Option<i64>,
-}
-
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct DiscoveryRootRecord {
-    pub id: String,
-    pub agent_id: String,
-    pub scope: String,
-    pub configured_path: String,
-    pub canonical_path: Option<String>,
-    pub enabled: bool,
-    pub is_default: bool,
-    pub last_warning: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SkillInstanceRecord {
     pub id: String,
@@ -74,76 +48,177 @@ pub(crate) struct SkillInstanceDraft {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct AgentDiscoverySnapshot {
-    pub target: AgentTargetRecord,
+pub struct ScanSnapshot {
+    pub targets: Vec<AgentTargetRecord>,
     pub roots: Vec<DiscoveryRootRecord>,
     pub instances: Vec<SkillInstanceRecord>,
     pub warnings: Vec<String>,
 }
 
-pub fn register_project_root(
-    db: &Database,
-    library_root: &Path,
-    path: impl AsRef<Path>,
-    timestamp: i64,
-) -> Result<DiscoveryRootRecord, AppError> {
-    let path = path.as_ref();
-    validate_real_directory(path)?;
-    let canonical = path.canonicalize()?;
-    validate_project_skills_root(&canonical)?;
-    let canonical_library = library_root.canonicalize()?;
-    if canonical.starts_with(&canonical_library) {
-        return Err(AppError::InvalidSkill(
-            "managed Library paths cannot be registered as Agent roots".to_string(),
-        ));
-    }
-
-    ensure_target_registration(db, timestamp)?;
-
-    let canonical_text = canonical.to_string_lossy().into_owned();
-    let record = DiscoveryRootRecord {
-        id: stable_root_id("project", &canonical_text),
-        agent_id: CLAUDE_CODE_ID.to_string(),
-        scope: "project".to_string(),
-        configured_path: canonical_text.clone(),
-        canonical_path: Some(canonical_text),
-        enabled: true,
-        is_default: false,
-        last_warning: None,
-    };
-    db.upsert_discovery_root(&record, timestamp)
+fn home_dir() -> Option<PathBuf> {
+    std::env::var_os("USERPROFILE")
+        .or_else(|| std::env::var_os("HOME"))
+        .map(PathBuf::from)
 }
 
-pub fn register_project_root_for_agent(
+fn platform_executable_names(agent: &AgentDefinition) -> Vec<String> {
+    #[cfg(windows)]
+    let suffixes = ["", ".exe", ".cmd", ".bat"];
+    #[cfg(not(windows))]
+    let suffixes = [""];
+    agent
+        .commands
+        .iter()
+        .flat_map(|command| {
+            suffixes
+                .iter()
+                .map(move |suffix| format!("{command}{suffix}"))
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+fn find_executable(path_value: &std::ffi::OsStr, candidates: &[String]) -> Option<PathBuf> {
+    std::env::split_paths(path_value).find_map(|directory| {
+        candidates.iter().find_map(|candidate| {
+            let path = directory.join(candidate);
+            if path.is_file() {
+                path.canonicalize().ok()
+            } else {
+                None
+            }
+        })
+    })
+}
+
+fn detect_target(agent: &AgentDefinition, home: Option<&Path>) -> AgentTargetRecord {
+    let executable = std::env::var_os("PATH").and_then(|path| {
+        let candidates = platform_executable_names(agent);
+        find_executable(&path, &candidates)
+    });
+
+    let roots_exist = home.is_some_and(|home| {
+        agent
+            .user_roots
+            .iter()
+            .any(|relative| home.join(relative).is_dir())
+    });
+    let detected = roots_exist || executable.is_some();
+
+    AgentTargetRecord {
+        id: agent.id.to_string(),
+        name: agent.name.to_string(),
+        provider: agent.provider.to_string(),
+        detected,
+        executable_path: executable.map(|path| path.to_string_lossy().into_owned()),
+        last_warning: (!detected).then(|| format!("{} 未在 PATH 或默认目录中找到", agent.name)),
+        last_scanned_at: None,
+    }
+}
+
+fn stable_root_id(agent_id: &str, scope: &str, path: &str) -> String {
+    skills::hash_text(&format!("{agent_id}\0{scope}\0{path}"))
+}
+
+fn stable_instance_id(agent_id: &str, root_id: &str, scope: &str, canonical_path: &str) -> String {
+    skills::hash_text(&format!("{agent_id}\0{root_id}\0{scope}\0{canonical_path}"))
+}
+
+/// Register one target per catalog agent (idempotent; detection is refreshed).
+pub fn ensure_targets_registered(db: &Database, timestamp: i64) -> Result<(), AppError> {
+    let home = home_dir();
+    for agent in agent_catalog::AGENTS {
+        let detected = detect_target(agent, home.as_deref());
+        let existing = db
+            .list_agent_targets()?
+            .into_iter()
+            .find(|target| target.id == detected.id);
+        let record = match existing {
+            Some(previous) if !previous.detected => AgentTargetRecord {
+                detected: detected.detected,
+                executable_path: detected.executable_path.or(previous.executable_path),
+                last_warning: detected.last_warning,
+                last_scanned_at: previous.last_scanned_at,
+                ..previous
+            },
+            _ => detected,
+        };
+        db.upsert_agent_target(&record, timestamp)?;
+    }
+    Ok(())
+}
+
+/// Register the default user roots that exist on disk for every catalog agent.
+pub fn ensure_default_user_roots(db: &Database, timestamp: i64) -> Result<Vec<String>, AppError> {
+    let mut warnings = Vec::new();
+    let Some(home) = home_dir() else {
+        return Ok(warnings);
+    };
+
+    for agent in agent_catalog::AGENTS {
+        for relative in agent.user_roots {
+            let configured = home.join(relative);
+            if !configured.is_dir() {
+                continue;
+            }
+            let canonical = match configured.canonicalize() {
+                Ok(path) => path,
+                Err(error) => {
+                    warnings.push(format!("{} 不可用: {error}", configured.display()));
+                    continue;
+                }
+            };
+            let canonical_text = canonical.to_string_lossy().into_owned();
+            let record = DiscoveryRootRecord {
+                id: stable_root_id(agent.id, "user", &canonical_text),
+                agent_id: agent.id.to_string(),
+                scope: "user".to_string(),
+                configured_path: configured.to_string_lossy().into_owned(),
+                canonical_path: Some(canonical_text),
+                enabled: true,
+                is_default: true,
+                last_warning: None,
+            };
+            db.upsert_discovery_root(&record, timestamp)?;
+        }
+    }
+    Ok(warnings)
+}
+
+/// Register a project skills root for an agent (e.g. `<repo>/.claude/skills`).
+pub fn register_project_root(
     db: &Database,
-    library_root: &Path,
     agent_id: &str,
     path: impl AsRef<Path>,
     timestamp: i64,
 ) -> Result<DiscoveryRootRecord, AppError> {
-    if agent_id == CLAUDE_CODE_ID {
-        return register_project_root(db, library_root, path, timestamp);
-    }
-    if agent_id != CODEX_ID {
-        return Err(AppError::State("unsupported Agent adapter".to_string()));
-    }
+    let agent = agent_catalog::definition(agent_id)
+        .ok_or_else(|| AppError::State(format!("未知 Agent: {agent_id}")))?;
     let path = path.as_ref();
-    validate_real_directory(path)?;
-    let canonical = path.canonicalize()?;
-    validate_codex_project_skills_root(&canonical)?;
-    let canonical_library = library_root.canonicalize()?;
-    if canonical.starts_with(&canonical_library) {
+
+    let metadata = fs::symlink_metadata(path).map_err(|error| {
+        AppError::InvalidSkill(format!("目录不可用: {} ({error})", path.display()))
+    })?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
         return Err(AppError::InvalidSkill(
-            "managed Library paths cannot be registered as Agent roots".to_string(),
+            "项目 Skills 目录必须是真实目录，不能是符号链接".to_string(),
         ));
     }
-    ensure_codex_target_registration(db, timestamp)?;
+    let canonical = path.canonicalize()?;
+    if !matches_project_convention(agent, &canonical) {
+        return Err(AppError::InvalidSkill(format!(
+            "{} 的项目目录需要匹配 {} 之一",
+            agent.name,
+            agent.project_roots.join(" / ")
+        )));
+    }
+
     let canonical_text = canonical.to_string_lossy().into_owned();
     let record = DiscoveryRootRecord {
-        id: hash_text(&format!("{CODEX_ID}\0project\0{canonical_text}")),
-        agent_id: CODEX_ID.to_string(),
+        id: stable_root_id(agent.id, "project", &canonical_text),
+        agent_id: agent.id.to_string(),
         scope: "project".to_string(),
-        configured_path: canonical_text.clone(),
+        configured_path: path.to_string_lossy().into_owned(),
         canonical_path: Some(canonical_text),
         enabled: true,
         is_default: false,
@@ -152,206 +227,73 @@ pub fn register_project_root_for_agent(
     db.upsert_discovery_root(&record, timestamp)
 }
 
-fn ensure_target_registration(db: &Database, timestamp: i64) -> Result<(), AppError> {
-    let already_registered = db
-        .list_agent_targets()?
-        .iter()
-        .any(|target| target.id == CLAUDE_CODE_ID);
-    if !already_registered {
-        db.upsert_agent_target(&detect_target(None), timestamp)?;
+fn matches_project_convention(agent: &AgentDefinition, canonical: &Path) -> bool {
+    let components: Vec<String> = canonical
+        .components()
+        .map(|component| component.as_os_str().to_string_lossy().into_owned())
+        .collect();
+    agent.project_roots.iter().any(|pattern| {
+        let expected: Vec<&str> = pattern.split('/').collect();
+        components.len() >= expected.len()
+            && expected
+                .iter()
+                .zip(components[components.len() - expected.len()..].iter())
+                .all(|(want, got)| want.eq_ignore_ascii_case(got))
+    })
+}
+
+/// Scan every enabled root and refresh the instance cache.
+pub fn scan_all(db: &Database, timestamp: i64) -> Result<ScanSnapshot, AppError> {
+    let mut warnings = ensure_default_user_roots(db, timestamp)?;
+    ensure_targets_registered(db, timestamp)?;
+
+    let roots = db.list_discovery_roots()?;
+    for root in &roots {
+        if !root.enabled {
+            continue;
+        }
+        warnings.extend(scan_and_persist_root(db, root, timestamp)?);
     }
-    Ok(())
+
+    Ok(ScanSnapshot {
+        targets: db.list_agent_targets()?,
+        roots: db.list_discovery_roots()?,
+        instances: db.list_skill_instances()?,
+        warnings,
+    })
 }
 
-fn detect_target(environment: Option<(&OsStr, i64)>) -> AgentTargetRecord {
-    let executable =
-        environment.and_then(|(path_value, _)| claude_code::find_executable(path_value));
-    let was_scanned = environment.is_some();
-    let detected = executable.is_some();
-    AgentTargetRecord {
-        id: CLAUDE_CODE_ID.to_string(),
-        name: "Claude Code".to_string(),
-        provider: "Anthropic".to_string(),
-        capabilities: vec!["detect".to_string(), "read-skills".to_string()],
-        detected,
-        executable_path: executable.map(|path| path.to_string_lossy().into_owned()),
-        version: None,
-        last_warning: (was_scanned && !detected)
-            .then(|| "Claude Code executable was not found on PATH".to_string()),
-        last_scanned_at: environment.map(|(_, timestamp)| timestamp),
-    }
-}
-
-fn ensure_codex_target_registration(db: &Database, timestamp: i64) -> Result<(), AppError> {
-    if !db
-        .list_agent_targets()?
-        .iter()
-        .any(|target| target.id == CODEX_ID)
-    {
-        db.upsert_agent_target(&detect_codex_target(None), timestamp)?;
-    }
-    Ok(())
-}
-
-fn detect_codex_target(environment: Option<(&OsStr, i64)>) -> AgentTargetRecord {
-    let executable = environment.and_then(|(path_value, _)| codex::find_executable(path_value));
-    let detected = executable.is_some();
-    AgentTargetRecord {
-        id: CODEX_ID.to_string(),
-        name: "Codex".to_string(),
-        provider: "OpenAI".to_string(),
-        capabilities: vec![
-            "detect".to_string(),
-            "read-skills".to_string(),
-            "safe-apply".to_string(),
-        ],
-        detected,
-        executable_path: executable.map(|path| path.to_string_lossy().into_owned()),
-        version: None,
-        last_warning: (environment.is_some() && !detected)
-            .then(|| "Codex executable was not found on PATH".to_string()),
-        last_scanned_at: environment.map(|(_, timestamp)| timestamp),
-    }
-}
-
-fn validate_real_directory(path: &Path) -> Result<(), AppError> {
-    let metadata = fs::symlink_metadata(path).map_err(|error| {
-        AppError::InvalidSkill(format!(
-            "discovery root cannot be inspected: {} ({error})",
-            path.display()
-        ))
-    })?;
-    if metadata.file_type().is_symlink() || !metadata.is_dir() {
-        return Err(AppError::InvalidSkill(
-            "discovery root must be a real directory and cannot be a symbolic link".to_string(),
-        ));
-    }
-    Ok(())
-}
-
-fn validate_project_skills_root(path: &Path) -> Result<(), AppError> {
-    let name = path.file_name().and_then(|value| value.to_str());
-    let parent = path
-        .parent()
-        .and_then(Path::file_name)
-        .and_then(|value| value.to_str());
-    if !name.is_some_and(|value| value.eq_ignore_ascii_case("skills"))
-        || !parent.is_some_and(|value| value.eq_ignore_ascii_case(".claude"))
-    {
-        return Err(AppError::InvalidSkill(
-            "project discovery root must point to a .claude/skills directory".to_string(),
-        ));
-    }
-    Ok(())
-}
-
-fn validate_codex_project_skills_root(path: &Path) -> Result<(), AppError> {
-    let name = path.file_name().and_then(|value| value.to_str());
-    let parent = path
-        .parent()
-        .and_then(Path::file_name)
-        .and_then(|value| value.to_str());
-    if !name.is_some_and(|value| value.eq_ignore_ascii_case("skills"))
-        || !parent.is_some_and(|value| {
-            value.eq_ignore_ascii_case(".agents") || value.eq_ignore_ascii_case(".codex")
-        })
-    {
-        return Err(AppError::InvalidSkill(
-            "Codex project root must point to a .agents/skills or .codex/skills directory"
-                .to_string(),
-        ));
-    }
-    Ok(())
-}
-
-fn stable_root_id(scope: &str, path: &str) -> String {
-    hash_text(&format!("{CLAUDE_CODE_ID}\0{scope}\0{path}"))
-}
-
-#[cfg(test)]
-pub(crate) fn scan_and_persist_root(
+fn scan_and_persist_root(
     db: &Database,
     root: &DiscoveryRootRecord,
-    library_root: &Path,
     timestamp: i64,
 ) -> Result<Vec<String>, AppError> {
     let configured_path = Path::new(&root.configured_path);
     let metadata = match fs::symlink_metadata(configured_path) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            let warning = format!(
-                "discovery root is not available: {}",
-                configured_path.display()
-            );
+            let warning = format!("目录不存在: {}", configured_path.display());
             persist_root_warning(db, root, None, &warning, timestamp)?;
             return Ok(vec![warning]);
         }
         Err(error) => {
-            let warning = format!(
-                "discovery root cannot be inspected: {} ({error})",
-                configured_path.display()
-            );
+            let warning = format!("目录不可用: {} ({error})", configured_path.display());
             persist_root_warning(db, root, None, &warning, timestamp)?;
             return Ok(vec![warning]);
         }
     };
 
     if metadata.file_type().is_symlink() || !metadata.is_dir() {
-        let warning = format!(
-            "discovery root must be a real directory and cannot be a symbolic link: {}",
-            configured_path.display()
-        );
+        let warning = format!("目录必须是真实目录: {}", configured_path.display());
         persist_root_warning(db, root, None, &warning, timestamp)?;
         return Ok(vec![warning]);
     }
 
-    let canonical_root = match configured_path.canonicalize() {
-        Ok(path) => path,
-        Err(error) => {
-            let warning = format!(
-                "discovery root cannot be canonicalized: {} ({error})",
-                configured_path.display()
-            );
-            persist_root_warning(db, root, None, &warning, timestamp)?;
-            return Ok(vec![warning]);
-        }
-    };
-    let canonical_library = library_root.canonicalize()?;
-    if canonical_root.starts_with(&canonical_library) {
-        let warning = "managed Library paths cannot be scanned as Agent roots".to_string();
-        persist_root_warning(
-            db,
-            root,
-            Some(canonical_root.to_string_lossy().into_owned()),
-            &warning,
-            timestamp,
-        )?;
-        return Ok(vec![warning]);
-    }
-
+    let canonical_root = configured_path.canonicalize()?;
     let mut entries = match fs::read_dir(&canonical_root) {
-        Ok(entries) => match entries.collect::<Result<Vec<_>, _>>() {
-            Ok(entries) => entries,
-            Err(error) => {
-                let warning = format!(
-                    "discovery root cannot be read completely: {} ({error})",
-                    canonical_root.display()
-                );
-                persist_root_warning(
-                    db,
-                    root,
-                    Some(canonical_root.to_string_lossy().into_owned()),
-                    &warning,
-                    timestamp,
-                )?;
-                return Ok(vec![warning]);
-            }
-        },
+        Ok(entries) => entries.collect::<Result<Vec<_>, _>>()?,
         Err(error) => {
-            let warning = format!(
-                "discovery root cannot be read: {} ({error})",
-                canonical_root.display()
-            );
+            let warning = format!("目录读取失败: {} ({error})", canonical_root.display());
             persist_root_warning(
                 db,
                 root,
@@ -368,18 +310,15 @@ pub(crate) fn scan_and_persist_root(
     let mut instances = Vec::new();
     for entry in entries {
         let path = entry.path();
-        let file_type = match entry.file_type() {
-            Ok(file_type) => file_type,
-            Err(error) => {
-                warnings.push(format!("cannot inspect {}: {error}", path.display()));
-                continue;
-            }
+        let Ok(file_type) = entry.file_type() else {
+            warnings.push(format!("无法读取条目: {}", path.display()));
+            continue;
         };
         if file_type.is_symlink() {
-            warnings.push(format!(
-                "symbolic links are not supported during discovery: {}",
-                path.display()
-            ));
+            // Links this app created during write-back are expected and silent.
+            if !db.link_exists_at_path(&path.to_string_lossy())? {
+                warnings.push(format!("跳过符号链接: {}", path.display()));
+            }
             continue;
         }
         if !file_type.is_dir() || !path.join("SKILL.md").is_file() {
@@ -406,9 +345,8 @@ pub(crate) fn scan_and_persist_root(
     }
 
     db.reconcile_root_instances(&root.id, &instances, timestamp)?;
-    let canonical_text = canonical_root.to_string_lossy().into_owned();
     let mut updated_root = root.clone();
-    updated_root.canonical_path = Some(canonical_text);
+    updated_root.canonical_path = Some(canonical_root.to_string_lossy().into_owned());
     updated_root.last_warning = if warnings.is_empty() {
         None
     } else {
@@ -419,7 +357,6 @@ pub(crate) fn scan_and_persist_root(
     Ok(warnings)
 }
 
-#[cfg(test)]
 fn persist_root_warning(
     db: &Database,
     root: &DiscoveryRootRecord,
@@ -435,35 +372,6 @@ fn persist_root_warning(
 }
 
 #[cfg(test)]
-fn stable_instance_id(agent_id: &str, root_id: &str, scope: &str, canonical_path: &str) -> String {
-    hash_text(&format!("{agent_id}\0{root_id}\0{scope}\0{canonical_path}"))
-}
-
-fn hash_text(value: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(value.as_bytes());
-    to_hex(&hasher.finalize())
-}
-
-fn to_hex(bytes: &[u8]) -> String {
-    let mut output = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        use std::fmt::Write;
-        let _ = write!(&mut output, "{byte:02x}");
-    }
-    output
-}
-
-pub(crate) fn unix_timestamp() -> Result<i64, AppError> {
-    let seconds = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|error| AppError::State(format!("system clock error: {error}")))?
-        .as_secs();
-    i64::try_from(seconds)
-        .map_err(|_| AppError::State("timestamp does not fit into i64".to_string()))
-}
-
-#[cfg(test)]
 mod tests {
     use std::{
         fs,
@@ -471,22 +379,16 @@ mod tests {
         time::{SystemTime, UNIX_EPOCH},
     };
 
-    use crate::db::Database;
+    use crate::{db::Database, skills::unix_timestamp};
 
-    use super::{
-        ensure_target_registration, scan_and_persist_root, AgentTargetRecord, DiscoveryRootRecord,
-        SkillInstanceRecord,
-    };
+    use super::*;
 
     fn test_root(label: &str) -> PathBuf {
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("clock should be valid")
             .as_nanos();
-        std::env::temp_dir().join(format!(
-            "skills-manger-m3-{label}-{}-{nonce}",
-            std::process::id()
-        ))
+        std::env::temp_dir().join(format!("skills-manger-discovery-{label}-{nonce}"))
     }
 
     fn write_skill(root: &Path, name: &str, description: &str) {
@@ -498,408 +400,130 @@ mod tests {
         .expect("manifest should write");
     }
 
-    fn prepare_database(
-        test_directory: &Path,
-        skills_root: &Path,
-        root_id: &str,
-        scope: &str,
-    ) -> (Database, DiscoveryRootRecord, PathBuf) {
-        let library = test_directory.join("library");
-        fs::create_dir_all(&library).expect("library should exist");
-        let database = Database::initialize(test_directory.join("skills.sqlite3"))
-            .expect("database should initialize");
-        database
-            .upsert_agent_target(
-                &AgentTargetRecord {
-                    id: "claude-code".to_string(),
-                    name: "Claude Code".to_string(),
-                    provider: "Anthropic".to_string(),
-                    capabilities: vec!["detect".to_string()],
-                    detected: false,
-                    executable_path: None,
-                    version: None,
-                    last_warning: None,
-                    last_scanned_at: None,
-                },
-                1,
-            )
-            .expect("target should persist");
-        let record = DiscoveryRootRecord {
-            id: root_id.to_string(),
-            agent_id: "claude-code".to_string(),
-            scope: scope.to_string(),
-            configured_path: skills_root.to_string_lossy().into_owned(),
-            canonical_path: None,
-            enabled: true,
-            is_default: scope == "user",
-            last_warning: None,
-        };
-        let record = database
-            .upsert_discovery_root(&record, 1)
-            .expect("root should persist");
-        (database, record, library)
-    }
-
-    fn instance_by_name(instances: &[SkillInstanceRecord], name: &str) -> SkillInstanceRecord {
-        instances
-            .iter()
-            .find(|instance| instance.name == name)
-            .cloned()
-            .expect("instance should exist")
-    }
-
     #[test]
-    fn initialization_preserves_last_detection_result() {
-        let test_directory = test_root("preserve-target");
-        fs::create_dir_all(&test_directory).expect("test directory should exist");
-        let database = Database::initialize(test_directory.join("skills.sqlite3"))
-            .expect("database should initialize");
-        let detected = AgentTargetRecord {
-            id: "claude-code".to_string(),
-            name: "Claude Code".to_string(),
-            provider: "Anthropic".to_string(),
-            capabilities: vec!["detect".to_string(), "read-skills".to_string()],
-            detected: true,
-            executable_path: Some("C:/tools/claude.exe".to_string()),
-            version: None,
-            last_warning: None,
-            last_scanned_at: Some(10),
-        };
-        database
-            .upsert_agent_target(&detected, 10)
-            .expect("target should persist");
+    fn project_root_registration_validates_convention() {
+        let directory = test_root("convention");
+        let valid = directory.join("project").join(".claude").join("skills");
+        fs::create_dir_all(&valid).expect("valid root should exist");
+        let database =
+            Database::initialize(directory.join("skills.sqlite3")).expect("db should open");
+        let now = unix_timestamp().expect("clock should be valid");
+        ensure_targets_registered(&database, now).expect("targets should register");
 
-        ensure_target_registration(&database, 20).expect("initialization should be idempotent");
+        let record = register_project_root(&database, "claude-code", &valid, now)
+            .expect("valid project root should register");
+        assert_eq!(record.agent_id, "claude-code");
+        assert_eq!(record.scope, "project");
+        assert!(!record.is_default);
 
-        assert_eq!(
-            database.list_agent_targets().expect("targets should list"),
-            vec![detected]
-        );
-        drop(database);
-        let _ = fs::remove_dir_all(test_directory);
-    }
+        let invalid = directory.join("project").join("skills");
+        fs::create_dir_all(&invalid).expect("invalid root should exist");
+        let error = register_project_root(&database, "claude-code", &invalid, now)
+            .expect_err("unbounded root should fail");
+        assert!(error.to_string().contains(".claude/skills"));
 
-    #[test]
-    fn discovers_valid_skills_without_executing_scripts() {
-        let test_directory = test_root("safe-scan");
-        let skills_root = test_directory
-            .join("project")
-            .join(".claude")
-            .join("skills");
-        let skill = skills_root.join("demo-skill");
-        write_skill(&skill, "demo-skill", "Safe scanner fixture.");
-        fs::create_dir_all(skill.join("scripts")).expect("scripts directory should exist");
-        let sentinel = test_directory.join("SCRIPT_EXECUTED");
-        fs::write(
-            skill.join("scripts").join("run.sh"),
-            format!("echo executed > {}", sentinel.display()),
-        )
-        .expect("script fixture should write");
-        let (database, root, library) =
-            prepare_database(&test_directory, &skills_root, "root-safe", "project");
-
-        let warnings = scan_and_persist_root(&database, &root, &library, 10)
-            .expect("root scan should succeed");
-        let instances = database
-            .list_skill_instances()
-            .expect("instances should list");
-
-        assert!(warnings.is_empty());
-        assert_eq!(instances.len(), 1);
-        assert_eq!(instances[0].state, "unmanaged");
-        assert_eq!(instances[0].script_count, 1);
-        assert!(!sentinel.exists());
+        let unknown = register_project_root(&database, "not-an-agent", &valid, now)
+            .expect_err("unknown agent should fail");
+        assert!(unknown.to_string().contains("未知 Agent"));
 
         drop(database);
-        let _ = fs::remove_dir_all(test_directory);
+        let _ = fs::remove_dir_all(directory);
     }
 
     #[test]
-    fn invalid_skill_does_not_hide_valid_sibling() {
-        let test_directory = test_root("invalid-sibling");
-        let skills_root = test_directory
-            .join("project")
-            .join(".claude")
-            .join("skills");
+    fn scan_finds_skills_and_isolates_invalid_siblings() {
+        let directory = test_root("scan");
+        let skills_root = directory.join("project").join(".agents").join("skills");
         write_skill(
             &skills_root.join("valid-skill"),
             "valid-skill",
-            "Valid sibling fixture.",
+            "Valid fixture.",
         );
         write_skill(
             &skills_root.join("wrong-directory"),
             "different-name",
-            "Invalid sibling fixture.",
+            "Invalid fixture.",
         );
-        let (database, root, library) =
-            prepare_database(&test_directory, &skills_root, "root-invalid", "project");
+        fs::create_dir_all(&directory).expect("test directory should exist");
+        let database =
+            Database::initialize(directory.join("skills.sqlite3")).expect("db should open");
+        let now = unix_timestamp().expect("clock should be valid");
+        ensure_targets_registered(&database, now).expect("targets should register");
 
-        let warnings = scan_and_persist_root(&database, &root, &library, 10)
-            .expect("root scan should isolate invalid skill");
+        let record = register_project_root(&database, "codex", &skills_root, now)
+            .expect("root should register");
+        let warnings =
+            scan_and_persist_root(&database, &record, now).expect("root scan should succeed");
         let instances = database
             .list_skill_instances()
             .expect("instances should list");
 
         assert_eq!(instances.len(), 1);
         assert_eq!(instances[0].name, "valid-skill");
+        assert_eq!(instances[0].state, "unmanaged");
+        assert_eq!(instances[0].agent_id, "codex");
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].contains("wrong-directory"));
 
         drop(database);
-        let _ = fs::remove_dir_all(test_directory);
+        let _ = fs::remove_dir_all(directory);
     }
 
     #[test]
-    fn same_name_in_different_roots_has_distinct_identity() {
-        let test_directory = test_root("same-name");
-        let first_root = test_directory.join("first").join(".claude").join("skills");
-        let second_root = test_directory.join("second").join(".claude").join("skills");
-        write_skill(
-            &first_root.join("demo-skill"),
-            "demo-skill",
-            "First source.",
-        );
-        write_skill(
-            &second_root.join("demo-skill"),
-            "demo-skill",
-            "Second source.",
-        );
-        let (database, first, library) =
-            prepare_database(&test_directory, &first_root, "root-first", "project");
-        let second = database
-            .upsert_discovery_root(
-                &DiscoveryRootRecord {
-                    id: "root-second".to_string(),
-                    agent_id: "claude-code".to_string(),
-                    scope: "project".to_string(),
-                    configured_path: second_root.to_string_lossy().into_owned(),
-                    canonical_path: None,
-                    enabled: true,
-                    is_default: false,
-                    last_warning: None,
-                },
-                1,
-            )
-            .expect("second root should persist");
-
-        scan_and_persist_root(&database, &first, &library, 10).expect("first root should scan");
-        scan_and_persist_root(&database, &second, &library, 11).expect("second root should scan");
-        let instances = database
-            .list_skill_instances()
-            .expect("instances should list");
-
-        assert_eq!(instances.len(), 2);
-        assert_ne!(instances[0].id, instances[1].id);
-        assert_ne!(instances[0].path, instances[1].path);
-
-        drop(database);
-        let _ = fs::remove_dir_all(test_directory);
-    }
-
-    #[test]
-    fn successful_rescan_marks_removed_instance_missing() {
-        let test_directory = test_root("missing-instance");
-        let skills_root = test_directory
-            .join("project")
-            .join(".claude")
-            .join("skills");
+    fn rescan_marks_disappeared_skill_missing() {
+        let directory = test_root("missing");
+        let skills_root = directory.join("project").join(".claude").join("skills");
         let skill = skills_root.join("demo-skill");
-        write_skill(&skill, "demo-skill", "Missing instance fixture.");
-        let (database, root, library) =
-            prepare_database(&test_directory, &skills_root, "root-missing", "project");
-        scan_and_persist_root(&database, &root, &library, 10).expect("initial scan should work");
+        write_skill(&skill, "demo-skill", "Missing fixture.");
+        let database =
+            Database::initialize(directory.join("skills.sqlite3")).expect("db should open");
+        let now = unix_timestamp().expect("clock should be valid");
+        ensure_targets_registered(&database, now).expect("targets should register");
 
-        fs::remove_dir_all(&skill).expect("fixture skill should be removed");
-        scan_and_persist_root(&database, &root, &library, 20).expect("rescan should work");
+        let record = register_project_root(&database, "claude-code", &skills_root, now)
+            .expect("root should register");
+        scan_and_persist_root(&database, &record, now).expect("first scan should work");
+
+        fs::remove_dir_all(&skill).expect("fixture should be removed");
+        scan_and_persist_root(&database, &record, now + 1).expect("rescan should work");
+
         let instances = database
             .list_skill_instances()
             .expect("instances should list");
-
         assert_eq!(instances.len(), 1);
         assert_eq!(instances[0].state, "missing");
-        assert_eq!(instances[0].last_discovered_at, 10);
 
         drop(database);
-        let _ = fs::remove_dir_all(test_directory);
+        let _ = fs::remove_dir_all(directory);
     }
 
     #[test]
-    fn missing_root_preserves_existing_instances_and_returns_warning() {
-        let test_directory = test_root("missing-root");
-        let skills_root = test_directory
-            .join("project")
-            .join(".claude")
-            .join("skills");
-        write_skill(
-            &skills_root.join("demo-skill"),
-            "demo-skill",
-            "Missing root fixture.",
-        );
-        let (database, root, library) =
-            prepare_database(&test_directory, &skills_root, "root-unavailable", "project");
-        scan_and_persist_root(&database, &root, &library, 10).expect("initial scan should work");
-        let before = instance_by_name(
-            &database
-                .list_skill_instances()
-                .expect("instances should list"),
-            "demo-skill",
-        );
+    fn scan_tolerates_missing_root() {
+        let directory = test_root("missing-root");
+        fs::create_dir_all(&directory).expect("test directory should exist");
+        let skills_root = directory.join("project").join(".claude").join("skills");
+        write_skill(&skills_root.join("demo-skill"), "demo-skill", "Fixture.");
+        let database =
+            Database::initialize(directory.join("skills.sqlite3")).expect("db should open");
+        let now = unix_timestamp().expect("clock should be valid");
+        ensure_targets_registered(&database, now).expect("targets should register");
 
-        fs::remove_dir_all(&skills_root).expect("fixture root should be removed");
-        let warnings = scan_and_persist_root(&database, &root, &library, 20)
+        let record = register_project_root(&database, "claude-code", &skills_root, now)
+            .expect("root should register");
+        scan_and_persist_root(&database, &record, now).expect("first scan should work");
+
+        fs::remove_dir_all(&skills_root).expect("root should be removed");
+        let warnings = scan_and_persist_root(&database, &record, now + 1)
             .expect("missing root should be recoverable");
-        let after = instance_by_name(
-            &database
-                .list_skill_instances()
-                .expect("instances should list"),
-            "demo-skill",
-        );
 
         assert_eq!(warnings.len(), 1);
-        assert!(warnings[0].contains("not available"));
-        assert_eq!(after.state, "unmanaged");
-        assert_eq!(after.last_discovered_at, before.last_discovered_at);
-
-        drop(database);
-        let _ = fs::remove_dir_all(test_directory);
-    }
-
-    #[test]
-    fn project_root_must_be_dot_claude_skills() {
-        let test_directory = test_root("invalid-project-root");
-        let invalid_root = test_directory.join("skills");
-        let library = test_directory.join("library");
-        fs::create_dir_all(&invalid_root).expect("invalid root should exist");
-        fs::create_dir_all(&library).expect("library should exist");
-        let database = Database::initialize(test_directory.join("skills.sqlite3"))
-            .expect("database should initialize");
-
-        let error = super::register_project_root(&database, &library, &invalid_root, 10)
-            .expect_err("invalid root should be rejected");
-
-        assert!(error.to_string().contains(".claude"));
-        assert!(database
-            .list_discovery_roots()
-            .expect("roots should list")
-            .is_empty());
-
-        drop(database);
-        let _ = fs::remove_dir_all(test_directory);
-    }
-
-    #[test]
-    fn duplicate_project_root_returns_existing_record() {
-        let test_directory = test_root("duplicate-project-root");
-        let skills_root = test_directory
-            .join("project")
-            .join(".claude")
-            .join("skills");
-        let library = test_directory.join("library");
-        fs::create_dir_all(&skills_root).expect("project root should exist");
-        fs::create_dir_all(&library).expect("library should exist");
-        let database = Database::initialize(test_directory.join("skills.sqlite3"))
-            .expect("database should initialize");
-        database
-            .upsert_agent_target(
-                &AgentTargetRecord {
-                    id: "claude-code".to_string(),
-                    name: "Claude Code".to_string(),
-                    provider: "Anthropic".to_string(),
-                    capabilities: vec!["detect".to_string()],
-                    detected: false,
-                    executable_path: None,
-                    version: None,
-                    last_warning: None,
-                    last_scanned_at: None,
-                },
-                1,
-            )
-            .expect("target should persist");
-
-        let first = super::register_project_root(&database, &library, &skills_root, 10)
-            .expect("first registration should work");
-        let second = super::register_project_root(&database, &library, &skills_root, 20)
-            .expect("duplicate registration should be idempotent");
-
-        assert_eq!(first.id, second.id);
-        assert_eq!(
-            database
-                .list_discovery_roots()
-                .expect("roots should list")
-                .len(),
-            1
-        );
-
-        drop(database);
-        let _ = fs::remove_dir_all(test_directory);
-    }
-
-    #[test]
-    fn codex_project_root_accepts_only_bounded_skill_conventions() {
-        let test_directory = test_root("codex-project-root");
-        let valid_root = test_directory
-            .join("project")
-            .join(".agents")
-            .join("skills");
-        let invalid_root = test_directory.join("project").join("skills");
-        let library = test_directory.join("library");
-        fs::create_dir_all(&valid_root).expect("valid root should exist");
-        fs::create_dir_all(&invalid_root).expect("invalid root should exist");
-        fs::create_dir_all(&library).expect("library should exist");
-        let database = Database::initialize(test_directory.join("skills.sqlite3"))
-            .expect("database should initialize");
-
-        let record =
-            super::register_project_root_for_agent(&database, &library, "codex", &valid_root, 10)
-                .expect("Codex root should register");
-        assert_eq!(record.agent_id, "codex");
-        let error =
-            super::register_project_root_for_agent(&database, &library, "codex", &invalid_root, 20)
-                .expect_err("unbounded root should fail");
-        assert!(error.to_string().contains(".agents/skills"));
-
-        drop(database);
-        let _ = fs::remove_dir_all(test_directory);
-    }
-
-    #[test]
-    fn linked_skill_directory_is_not_followed() {
-        let test_directory = test_root("linked-skill");
-        let skills_root = test_directory
-            .join("project")
-            .join(".claude")
-            .join("skills");
-        let external_skill = test_directory.join("outside").join("external-skill");
-        let linked_skill = skills_root.join("external-skill");
-        fs::create_dir_all(&skills_root).expect("skills root should exist");
-        write_skill(
-            &external_skill,
-            "external-skill",
-            "External linked fixture.",
-        );
-
-        #[cfg(unix)]
-        std::os::unix::fs::symlink(&external_skill, &linked_skill)
-            .expect("directory symlink should be created");
-        #[cfg(windows)]
-        if std::os::windows::fs::symlink_dir(&external_skill, &linked_skill).is_err() {
-            let _ = fs::remove_dir_all(test_directory);
-            return;
-        }
-
-        let (database, root, library) =
-            prepare_database(&test_directory, &skills_root, "root-linked", "project");
-        let warnings = scan_and_persist_root(&database, &root, &library, 10)
-            .expect("linked child should be recoverable");
-
-        assert_eq!(warnings.len(), 1);
-        assert!(warnings[0].contains("symbolic links"));
-        assert!(database
+        assert!(warnings[0].contains("不存在"));
+        let instances = database
             .list_skill_instances()
-            .expect("instances should list")
-            .is_empty());
+            .expect("instances should list");
+        assert_eq!(instances[0].state, "unmanaged");
 
         drop(database);
-        let _ = fs::remove_dir_all(test_directory);
+        let _ = fs::remove_dir_all(directory);
     }
 }

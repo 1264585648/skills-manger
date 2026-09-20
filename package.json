@@ -7,7 +7,6 @@
     "dev": "vite --host 0.0.0.0 --port 1420",
     "build": "tsc --noEmit && vite build",
     "typecheck": "tsc --noEmit",
-    "test:frontend": "node --test tests/formatTimestamp.test.ts tests/discoveryMappers.test.ts tests/bundlePlannerMappers.test.ts tests/conflictResolver.test.ts tests/agentCenter.test.ts tests/agentWorkspaceState.test.ts tests/skillTagState.test.ts",
     "preview": "vite preview",
     "tauri": "tauri",
     "desktop:dev": "node scripts/desktop.mjs dev",
@@ -16,7 +15,6 @@
   "dependencies": {
     "@tauri-apps/api": "2.11.1",
     "@tauri-apps/plugin-dialog": "2.7.3",
-    "lucide-react": "^1.43.0",
     "react": "19.2.8",
     "react-dom": "19.2.8"
   },

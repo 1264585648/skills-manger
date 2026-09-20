@@ -1,78 +1,19 @@
-export type PageKey = "home" | "skills" | "bundles" | "agents" | "sync" | "settings";
+export type PageKey = "discover" | "govern" | "writeback";
 
-export type SkillStatus = "clean" | "update" | "upstream_update" | "local_modified" | "target_drift" | "unmanaged" | "conflict" | "missing";
-
-export interface Skill {
-  id: string;
-  name: string;
-  description: string;
-  source: string;
-  sourcePath?: string;
-  libraryPath?: string;
-  contentHash?: string;
-  version: string;
-  status: SkillStatus;
-  tags: string[];
-  bundles: string[];
-  targets: string[];
-  lastUpdated: string;
-  security: string;
-  license?: string;
-  compatibility?: string;
-  allowedTools?: string;
-  trackedSourceId?: string;
-  updateStatus?: string;
-  canPromote?: boolean;
+/** A discovered skill with its governance metadata joined in for display. */
+export interface GovernedSkill {
+  instance: import("./discovery").SkillInstanceRecord;
+  note: string;
+  groupId: string | null;
+  groupName: string | null;
+  tagIds: string[];
+  tagNames: string[];
 }
 
-export interface SkillTag {
-  id: string;
-  name: string;
-  isSystem: boolean;
-  skillCount: number;
-}
+/** Strip the Windows \\?\ verbatim prefix for display. */
+export const displayPath = (path: string): string =>
+  path.startsWith("\\\\?\\") ? path.slice(4) : path;
 
-export interface Bundle {
-  id: string;
-  name: string;
-  description: string;
-  skillIds: string[];
-  targets: string[];
-  updatedAt: string;
-  conflict?: string;
-}
-
-export type AgentStatus = "ready" | "limited" | "setup" | "error";
-
-export interface Agent {
-  id: string;
-  name: string;
-  type: string;
-  status: AgentStatus;
-  version: string;
-  path: string;
-  scopes: string[];
-  capabilities: string[];
-  discoveredSkills: number;
-  warning?: string;
-  lastScannedAt?: number;
-}
-
-export type SyncAction = "add" | "update" | "unchanged" | "conflict";
-
-export interface SyncItem {
-  id: string;
-  skillName: string;
-  action: SyncAction;
-  current: string;
-  target: string;
-  reason: string;
-}
-
-export interface SourceConfig {
-  id: string;
-  name: string;
-  description: string;
-  detail: string;
-  enabled: boolean;
-}
+/** Short, copy-friendly form of a content hash. */
+export const shortHash = (hash: string): string =>
+  hash.length > 12 ? `${hash.slice(0, 12)}…` : hash;
