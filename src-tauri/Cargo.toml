@@ -21,3 +21,19 @@ sha2 = "0.10"
 tauri = { version = "2.11.5", features = [] }
 tauri-plugin-dialog = "2"
 thiserror = "2"
+
+# Scanning is CPU bound (directory walks plus SHA-256 over every skill file).
+# A fully unoptimized debug binary made the first scan feel frozen, so the
+# dependencies that do the real work (rusqlite, sha2, serde) are optimized even
+# in dev builds while this crate stays fast to compile.
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true

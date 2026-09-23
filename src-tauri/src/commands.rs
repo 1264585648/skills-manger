@@ -42,15 +42,24 @@ pub fn get_health(state: State<'_, AppState>) -> Result<HealthSnapshot, CommandE
 // ------------------------------------------------------------------ 发现
 
 #[tauri::command]
-pub fn scan(state: State<'_, AppState>) -> Result<ScanSnapshot, CommandError> {
-    let snapshot =
-        agent_discovery::scan_all(&state.db, unix_timestamp()?).map_err(CommandError::from)?;
+pub fn scan(state: State<'_, AppState>, force: Option<bool>) -> Result<ScanSnapshot, CommandError> {
+    // `force` asks for a real pass over the disk. Everything else is served
+    // from the cache filled by the startup scan or the last explicit scan, so
+    // mounting the page (twice, under React strict mode) is instant.
+    let force = force.unwrap_or(false);
+    let snapshot = state
+        .scan(force, unix_timestamp()?)
+        .map_err(CommandError::from)?;
 
     let _ = state.log.write(
         "info",
-        "scan_finished",
+        if force {
+            "scan_finished"
+        } else {
+            "scan_served_from_cache"
+        },
         &format!(
-            "{} roots scanned; {} skills found; {} warnings",
+            "{} roots; {} skills; {} warnings",
             snapshot.roots.len(),
             snapshot.instances.len(),
             snapshot.warnings.len()

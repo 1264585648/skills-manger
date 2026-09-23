@@ -3,6 +3,7 @@
 //! read-only and never executes anything inside a skill directory.
 
 use std::{
+    collections::{HashMap, HashSet},
     fs,
     path::{Path, PathBuf},
 };
@@ -43,10 +44,11 @@ pub(crate) struct SkillInstanceDraft {
     pub(crate) name: String,
     pub(crate) description: String,
     pub(crate) content_hash: String,
+    pub(crate) content_signature: String,
     pub(crate) script_count: i64,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ScanSnapshot {
     pub targets: Vec<AgentTargetRecord>,
@@ -104,12 +106,14 @@ fn detect_target(agent: &AgentDefinition, home: Option<&Path>) -> AgentTargetRec
             .any(|relative| home.join(relative).is_dir())
     });
     let detected = roots_exist || executable.is_some();
+    let installed = executable.is_some();
 
     AgentTargetRecord {
         id: agent.id.to_string(),
         name: agent.name.to_string(),
         provider: agent.provider.to_string(),
         detected,
+        installed,
         executable_path: executable.map(|path| path.to_string_lossy().into_owned()),
         last_warning: (!detected).then(|| format!("{} 未在 PATH 或默认目录中找到", agent.name)),
         last_scanned_at: None,
@@ -127,19 +131,26 @@ fn stable_instance_id(agent_id: &str, root_id: &str, scope: &str, canonical_path
 /// Register one target per catalog agent (idempotent; detection is refreshed).
 pub fn ensure_targets_registered(db: &Database, timestamp: i64) -> Result<(), AppError> {
     let home = home_dir();
+    // One query instead of one per catalog agent: the previous version scanned
+    // the whole table 15 times on every start.
+    let existing: HashMap<String, AgentTargetRecord> = db
+        .list_agent_targets()?
+        .into_iter()
+        .map(|target| (target.id.clone(), target))
+        .collect();
+
     for agent in agent_catalog::AGENTS {
         let detected = detect_target(agent, home.as_deref());
-        let existing = db
-            .list_agent_targets()?
-            .into_iter()
-            .find(|target| target.id == detected.id);
-        let record = match existing {
+        let record = match existing.get(&detected.id) {
             Some(previous) if !previous.detected => AgentTargetRecord {
                 detected: detected.detected,
-                executable_path: detected.executable_path.or(previous.executable_path),
+                installed: detected.installed,
+                executable_path: detected
+                    .executable_path
+                    .or(previous.executable_path.clone()),
                 last_warning: detected.last_warning,
                 last_scanned_at: previous.last_scanned_at,
-                ..previous
+                ..previous.clone()
             },
             _ => detected,
         };
@@ -242,6 +253,14 @@ fn matches_project_convention(agent: &AgentDefinition, canonical: &Path) -> bool
     })
 }
 
+/// Everything a scan needs from the database, read once and shared by all roots.
+struct ScanContext {
+    /// Link paths this app created, so its own write-back entries stay silent.
+    link_paths: HashSet<String>,
+    /// `skill path -> (content_hash, content_signature)` from the previous scan.
+    signatures: HashMap<String, (String, Option<String>)>,
+}
+
 /// Scan every enabled root and refresh the instance cache.
 pub fn scan_all(db: &Database, timestamp: i64) -> Result<ScanSnapshot, AppError> {
     // Targets first: discovery_roots.agent_id references agent_targets(id),
@@ -249,14 +268,27 @@ pub fn scan_all(db: &Database, timestamp: i64) -> Result<ScanSnapshot, AppError>
     ensure_targets_registered(db, timestamp)?;
     let mut warnings = ensure_default_user_roots(db, timestamp)?;
 
+    let context = ScanContext {
+        link_paths: db.link_paths()?,
+        signatures: db.skill_signatures()?,
+    };
+
     let roots = db.list_discovery_roots()?;
     for root in &roots {
         if !root.enabled {
             continue;
         }
-        warnings.extend(scan_and_persist_root(db, root, timestamp)?);
+        warnings.extend(scan_and_persist_root(db, root, &context, timestamp)?);
     }
 
+    snapshot(db, warnings)
+}
+
+/// The cached picture, without touching the disk.
+///
+/// Served to the UI while a background scan is still running or right after it
+/// finished, so opening the app never waits for the filesystem.
+pub fn snapshot(db: &Database, warnings: Vec<String>) -> Result<ScanSnapshot, AppError> {
     Ok(ScanSnapshot {
         targets: db.list_agent_targets()?,
         roots: db.list_discovery_roots()?,
@@ -268,6 +300,7 @@ pub fn scan_all(db: &Database, timestamp: i64) -> Result<ScanSnapshot, AppError>
 fn scan_and_persist_root(
     db: &Database,
     root: &DiscoveryRootRecord,
+    context: &ScanContext,
     timestamp: i64,
 ) -> Result<Vec<String>, AppError> {
     let configured_path = Path::new(&root.configured_path);
@@ -275,19 +308,19 @@ fn scan_and_persist_root(
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             let warning = format!("目录不存在: {}", configured_path.display());
-            persist_root_warning(db, root, None, &warning, timestamp)?;
+            save_root_state(db, root, None, Some(&warning), timestamp)?;
             return Ok(vec![warning]);
         }
         Err(error) => {
             let warning = format!("目录不可用: {} ({error})", configured_path.display());
-            persist_root_warning(db, root, None, &warning, timestamp)?;
+            save_root_state(db, root, None, Some(&warning), timestamp)?;
             return Ok(vec![warning]);
         }
     };
 
     if metadata.file_type().is_symlink() || !metadata.is_dir() {
         let warning = format!("目录必须是真实目录: {}", configured_path.display());
-        persist_root_warning(db, root, None, &warning, timestamp)?;
+        save_root_state(db, root, None, Some(&warning), timestamp)?;
         return Ok(vec![warning]);
     }
 
@@ -296,11 +329,11 @@ fn scan_and_persist_root(
         Ok(entries) => entries.collect::<Result<Vec<_>, _>>()?,
         Err(error) => {
             let warning = format!("目录读取失败: {} ({error})", canonical_root.display());
-            persist_root_warning(
+            save_root_state(
                 db,
                 root,
                 Some(canonical_root.to_string_lossy().into_owned()),
-                &warning,
+                Some(&warning),
                 timestamp,
             )?;
             return Ok(vec![warning]);
@@ -318,7 +351,10 @@ fn scan_and_persist_root(
         };
         if file_type.is_symlink() {
             // Links this app created during write-back are expected and silent.
-            if !db.link_exists_at_path(&path.to_string_lossy())? {
+            if !context
+                .link_paths
+                .contains(&path.to_string_lossy().into_owned())
+            {
                 warnings.push(format!("跳过符号链接: {}", path.display()));
             }
             continue;
@@ -327,7 +363,14 @@ fn scan_and_persist_root(
             continue;
         }
 
-        match skills::inspect_skill(&path) {
+        // Cheap case: the fingerprint still matches, so the stored hash is
+        // reused and no file body is read.
+        let cached = context
+            .signatures
+            .get(&path.to_string_lossy().into_owned())
+            .map(|(hash, signature)| (hash.as_str(), signature.as_deref()));
+
+        match skills::inspect_skill(&path, cached) {
             Ok(inspected) => {
                 let canonical_path = inspected.source_path.to_string_lossy().into_owned();
                 instances.push(SkillInstanceDraft {
@@ -339,6 +382,7 @@ fn scan_and_persist_root(
                     name: inspected.name,
                     description: inspected.description,
                     content_hash: inspected.content_hash,
+                    content_signature: inspected.content_signature,
                     script_count: inspected.script_count,
                 });
             }
@@ -347,28 +391,44 @@ fn scan_and_persist_root(
     }
 
     db.reconcile_root_instances(&root.id, &instances, timestamp)?;
-    let mut updated_root = root.clone();
-    updated_root.canonical_path = Some(canonical_root.to_string_lossy().into_owned());
-    updated_root.last_warning = if warnings.is_empty() {
+    let canonical_text = canonical_root.to_string_lossy().into_owned();
+    let warning = if warnings.is_empty() {
         None
     } else {
         Some(warnings.join("; "))
     };
-    db.upsert_discovery_root(&updated_root, timestamp)?;
+    save_root_state(
+        db,
+        root,
+        Some(canonical_text),
+        warning.as_deref(),
+        timestamp,
+    )?;
 
     Ok(warnings)
 }
 
-fn persist_root_warning(
+/// Persist a root's canonical path and warning, skipping the write when nothing
+/// actually changed (a rescan now writes far less than it used to).
+fn save_root_state(
     db: &Database,
     root: &DiscoveryRootRecord,
     canonical_path: Option<String>,
-    warning: &str,
+    warning: Option<&str>,
     timestamp: i64,
 ) -> Result<(), AppError> {
+    let next_warning = warning
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+
+    if root.canonical_path == canonical_path && root.last_warning == next_warning {
+        return Ok(());
+    }
+
     let mut updated_root = root.clone();
     updated_root.canonical_path = canonical_path;
-    updated_root.last_warning = Some(warning.to_string());
+    updated_root.last_warning = next_warning;
     db.upsert_discovery_root(&updated_root, timestamp)?;
     Ok(())
 }
@@ -384,6 +444,14 @@ mod tests {
     use crate::{db::Database, skills::unix_timestamp};
 
     use super::*;
+
+    /// Test-side view of what `scan_all` loads once per scan.
+    fn scan_context(db: &Database) -> ScanContext {
+        ScanContext {
+            link_paths: db.link_paths().expect("links should list"),
+            signatures: db.skill_signatures().expect("signatures should list"),
+        }
+    }
 
     fn test_root(label: &str) -> PathBuf {
         let nonce = SystemTime::now()
@@ -454,8 +522,8 @@ mod tests {
 
         let record = register_project_root(&database, "codex", &skills_root, now)
             .expect("root should register");
-        let warnings =
-            scan_and_persist_root(&database, &record, now).expect("root scan should succeed");
+        let warnings = scan_and_persist_root(&database, &record, &scan_context(&database), now)
+            .expect("root scan should succeed");
         let instances = database
             .list_skill_instances()
             .expect("instances should list");
@@ -484,10 +552,12 @@ mod tests {
 
         let record = register_project_root(&database, "claude-code", &skills_root, now)
             .expect("root should register");
-        scan_and_persist_root(&database, &record, now).expect("first scan should work");
+        scan_and_persist_root(&database, &record, &scan_context(&database), now)
+            .expect("first scan should work");
 
         fs::remove_dir_all(&skill).expect("fixture should be removed");
-        scan_and_persist_root(&database, &record, now + 1).expect("rescan should work");
+        scan_and_persist_root(&database, &record, &scan_context(&database), now + 1)
+            .expect("rescan should work");
 
         let instances = database
             .list_skill_instances()
@@ -512,10 +582,11 @@ mod tests {
 
         let record = register_project_root(&database, "claude-code", &skills_root, now)
             .expect("root should register");
-        scan_and_persist_root(&database, &record, now).expect("first scan should work");
+        scan_and_persist_root(&database, &record, &scan_context(&database), now)
+            .expect("first scan should work");
 
         fs::remove_dir_all(&skills_root).expect("root should be removed");
-        let warnings = scan_and_persist_root(&database, &record, now + 1)
+        let warnings = scan_and_persist_root(&database, &record, &scan_context(&database), now + 1)
             .expect("missing root should be recoverable");
 
         assert_eq!(warnings.len(), 1);

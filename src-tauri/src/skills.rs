@@ -2,7 +2,8 @@
 //! Read-only: nothing here copies files or executes scripts.
 
 use std::{
-    fs,
+    fs::{self, File},
+    io::{BufReader, Read},
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -26,6 +27,7 @@ pub(crate) struct InspectedSkill {
     pub(crate) name: String,
     pub(crate) description: String,
     pub(crate) content_hash: String,
+    pub(crate) content_signature: String,
     pub(crate) script_count: i64,
 }
 
@@ -34,30 +36,52 @@ struct SkillContents {
     name: String,
     description: String,
     content_hash: String,
+    content_signature: String,
     script_count: i64,
 }
 
+/// One file inside a skill directory, with everything the cheap fingerprint needs.
+struct FileEntry {
+    relative: PathBuf,
+    absolute: PathBuf,
+    len: u64,
+    modified_nanos: u128,
+}
+
 /// Inspect a skill directory in place: `SKILL.md` must exist as a regular file,
-/// `name` must match the parent directory, and the whole tree is hashed.
-pub(crate) fn inspect_skill(root: &Path) -> Result<InspectedSkill, AppError> {
+/// `name` must match the parent directory, and the whole tree is fingerprinted.
+///
+/// `cached` carries the `(content_hash, content_signature)` stored by the
+/// previous scan. When the on-disk fingerprint still matches, the stored hash
+/// is reused and no file body is read at all — the difference between a
+/// re-scan costing one `stat` per file and one full read per file.
+pub(crate) fn inspect_skill(
+    root: &Path,
+    cached: Option<(&str, Option<&str>)>,
+) -> Result<InspectedSkill, AppError> {
     let parent_name = root
         .file_name()
         .and_then(|value| value.to_str())
         .ok_or_else(|| {
             AppError::InvalidSkill("skill directory name is not valid UTF-8".to_string())
         })?;
-    let contents = inspect_skill_contents(root, parent_name)?;
+    let contents = inspect_skill_contents(root, parent_name, cached)?;
 
     Ok(InspectedSkill {
         source_path: root.to_path_buf(),
         name: contents.name,
         description: contents.description,
         content_hash: contents.content_hash,
+        content_signature: contents.content_signature,
         script_count: contents.script_count,
     })
 }
 
-fn inspect_skill_contents(root: &Path, expected_name: &str) -> Result<SkillContents, AppError> {
+fn inspect_skill_contents(
+    root: &Path,
+    expected_name: &str,
+    cached: Option<(&str, Option<&str>)>,
+) -> Result<SkillContents, AppError> {
     let manifest_path = root.join("SKILL.md");
     let manifest_metadata = match fs::symlink_metadata(&manifest_path) {
         Ok(metadata) => metadata,
@@ -85,13 +109,20 @@ fn inspect_skill_contents(root: &Path, expected_name: &str) -> Result<SkillConte
     let manifest = parse_manifest(&raw)?;
     validate_manifest(expected_name, &manifest)?;
 
-    let (content_hash, script_count) = hash_tree(root)?;
+    let tree = fingerprint_tree(root)?;
+    let (content_hash, cached_signature) = match cached {
+        Some((hash, signature)) if signature == Some(tree.signature.as_str()) => {
+            (hash.to_string(), tree.signature.clone())
+        }
+        _ => (hash_files(&tree.files)?, tree.signature.clone()),
+    };
 
     Ok(SkillContents {
         name: manifest.name,
         description: manifest.description,
         content_hash,
-        script_count,
+        content_signature: cached_signature,
+        script_count: tree.script_count,
     })
 }
 
@@ -168,10 +199,20 @@ fn validate_manifest(expected_name: &str, manifest: &SkillFrontmatter) -> Result
     Ok(())
 }
 
-fn hash_tree(root: &Path) -> Result<(String, i64), AppError> {
+struct TreeFingerprint {
+    signature: String,
+    script_count: i64,
+    files: Vec<FileEntry>,
+}
+
+/// Cheap pass over the tree: one `stat` per file, no file body is read.
+///
+/// The signature covers relative path, size and mtime, so a skill is only
+/// re-hashed when something on disk actually moved.
+fn fingerprint_tree(root: &Path) -> Result<TreeFingerprint, AppError> {
     let mut files = Vec::new();
     collect_files(root, root, &mut files)?;
-    files.sort_by(|a, b| a.0.cmp(&b.0));
+    files.sort_by(|a, b| a.relative.cmp(&b.relative));
 
     if files.len() > 2_000 {
         return Err(AppError::InvalidSkill(
@@ -179,9 +220,9 @@ fn hash_tree(root: &Path) -> Result<(String, i64), AppError> {
         ));
     }
 
-    let total_bytes = files.iter().try_fold(0_u64, |total, (_, path)| {
-        Ok::<u64, AppError>(total.saturating_add(fs::metadata(path)?.len()))
-    })?;
+    let total_bytes = files
+        .iter()
+        .fold(0_u64, |total, entry| total.saturating_add(entry.len));
     if total_bytes > 100 * 1024 * 1024 {
         return Err(AppError::InvalidSkill(
             "skill is larger than 100 MB; scanning is blocked for safety".to_string(),
@@ -190,9 +231,9 @@ fn hash_tree(root: &Path) -> Result<(String, i64), AppError> {
 
     let mut hasher = Sha256::new();
     let mut script_count = 0_i64;
-
-    for (relative, absolute) in files {
-        if relative
+    for entry in &files {
+        if entry
+            .relative
             .components()
             .next()
             .is_some_and(|part| part.as_os_str() == std::ffi::OsStr::new("scripts"))
@@ -200,21 +241,49 @@ fn hash_tree(root: &Path) -> Result<(String, i64), AppError> {
             script_count += 1;
         }
 
-        let relative_text = relative.to_string_lossy().replace('\\', "/");
+        let relative_text = entry.relative.to_string_lossy().replace('\\', "/");
         hasher.update(relative_text.as_bytes());
         hasher.update([0]);
-        hasher.update(fs::read(absolute)?);
+        hasher.update(entry.len.to_le_bytes());
+        hasher.update([0]);
+        hasher.update(entry.modified_nanos.to_le_bytes());
         hasher.update([0]);
     }
 
-    Ok((to_hex(&hasher.finalize()), script_count))
+    Ok(TreeFingerprint {
+        signature: to_hex(&hasher.finalize()),
+        script_count,
+        files,
+    })
 }
 
-fn collect_files(
-    root: &Path,
-    current: &Path,
-    output: &mut Vec<(PathBuf, PathBuf)>,
-) -> Result<(), AppError> {
+/// Content hash of a whole skill: relative path plus file bytes, streamed so a
+/// large skill never lands in memory in one piece.
+fn hash_files(files: &[FileEntry]) -> Result<String, AppError> {
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+
+    for entry in files {
+        let relative_text = entry.relative.to_string_lossy().replace('\\', "/");
+        hasher.update(relative_text.as_bytes());
+        hasher.update([0]);
+
+        let mut reader = BufReader::new(File::open(&entry.absolute)?);
+        loop {
+            let read = reader.read(&mut buffer)?;
+            if read == 0 {
+                break;
+            }
+            hasher.update(&buffer[..read]);
+        }
+
+        hasher.update([0]);
+    }
+
+    Ok(to_hex(&hasher.finalize()))
+}
+
+fn collect_files(root: &Path, current: &Path, output: &mut Vec<FileEntry>) -> Result<(), AppError> {
     let mut entries = fs::read_dir(current)?.collect::<Result<Vec<_>, _>>()?;
     entries.sort_by_key(|entry| entry.file_name());
 
@@ -224,7 +293,10 @@ fn collect_files(
         }
 
         let path = entry.path();
-        let file_type = entry.file_type()?;
+        // `DirEntry::metadata` does not follow symlinks and saves the extra
+        // stat that `fs::metadata` would cost for every file of every skill.
+        let metadata = entry.metadata()?;
+        let file_type = metadata.file_type();
 
         if file_type.is_symlink() {
             return Err(AppError::InvalidSkill(format!(
@@ -242,7 +314,18 @@ fn collect_files(
                     AppError::State("failed to calculate relative skill path".to_string())
                 })?
                 .to_path_buf();
-            output.push((relative, path));
+            let modified_nanos = metadata
+                .modified()
+                .ok()
+                .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
+                .map(|duration| duration.as_nanos())
+                .unwrap_or(0);
+            output.push(FileEntry {
+                relative,
+                absolute: path,
+                len: metadata.len(),
+                modified_nanos,
+            });
         }
     }
 
@@ -308,7 +391,7 @@ mod tests {
         time::{SystemTime, UNIX_EPOCH},
     };
 
-    use super::{hash_text, hash_tree, inspect_skill};
+    use super::{hash_text, inspect_skill};
 
     fn test_root(label: &str) -> PathBuf {
         let nonce = SystemTime::now()
@@ -343,7 +426,7 @@ mod tests {
         )
         .expect("script fixture should be written");
 
-        let inspected = inspect_skill(&skill).expect("inspection should work");
+        let inspected = inspect_skill(&skill, None).expect("inspection should work");
 
         assert_eq!(inspected.name, "demo-skill");
         assert_eq!(inspected.description, "Test skill fixture.");
@@ -365,7 +448,7 @@ mod tests {
         )
         .expect("manifest should be written");
 
-        let error = inspect_skill(&skill).expect_err("mismatch should fail");
+        let error = inspect_skill(&skill, None).expect_err("mismatch should fail");
 
         assert!(error.to_string().contains("must match parent directory"));
         let _ = fs::remove_dir_all(root);
@@ -377,16 +460,48 @@ mod tests {
         let skill = root.join("demo-skill");
         write_skill(&skill, "demo-skill", "first");
 
-        let (first_hash, _) = hash_tree(&skill).expect("hash should work");
+        let first = inspect_skill(&skill, None).expect("hash should work");
         fs::write(
             skill.join("SKILL.md"),
-            "---\nname: demo-skill\ndescription: Test skill fixture.\n---\n\nsecond\n",
+            "---\nname: demo-skill\ndescription: Test skill fixture.\n---\n\nsecond version\n",
         )
         .expect("manifest should be rewritten");
-        let (second_hash, _) = hash_tree(&skill).expect("hash should work");
+        let second = inspect_skill(&skill, None).expect("hash should work");
 
-        assert_ne!(first_hash, second_hash);
+        assert_ne!(first.content_hash, second.content_hash);
         assert_eq!(hash_text("demo"), hash_text("demo"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn unchanged_skill_reuses_the_cached_hash() {
+        let root = test_root("fingerprint");
+        let skill = root.join("demo-skill");
+        write_skill(&skill, "demo-skill", "first");
+
+        let first = inspect_skill(&skill, None).expect("inspection should work");
+        let cached = inspect_skill(
+            &skill,
+            Some(("cached-hash", Some(first.content_signature.as_str()))),
+        )
+        .expect("cached inspection should work");
+        assert_eq!(
+            cached.content_hash, "cached-hash",
+            "an unchanged skill must not be re-read"
+        );
+
+        // A differing signature (here: different file size) forces a real hash.
+        fs::write(skill.join("scripts").join("run.py"), "print('changed')\n")
+            .expect("script should be rewritten");
+        let refreshed = inspect_skill(
+            &skill,
+            Some(("cached-hash", Some(first.content_signature.as_str()))),
+        )
+        .expect("refreshed inspection should work");
+        assert_eq!(refreshed.content_hash.len(), 64);
+        assert_ne!(refreshed.content_hash, "cached-hash");
+        assert_ne!(refreshed.content_signature, first.content_signature);
 
         let _ = fs::remove_dir_all(root);
     }
@@ -412,7 +527,7 @@ mod tests {
             return;
         }
 
-        let error = inspect_skill(&skill).expect_err("linked manifest should be rejected");
+        let error = inspect_skill(&skill, None).expect_err("linked manifest should be rejected");
 
         assert!(error
             .to_string()

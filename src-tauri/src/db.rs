@@ -4,7 +4,11 @@
 //! found on disk, governance metadata (group / tag / Chinese note) is keyed by
 //! the canonical skill path, and write-back records the symlinks we created.
 
-use std::path::{Path, PathBuf};
+use std::{
+    collections::{HashMap, HashSet},
+    path::{Path, PathBuf},
+    sync::{Mutex, MutexGuard},
+};
 
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use serde::{Deserialize, Serialize};
@@ -14,9 +18,17 @@ use crate::{
     error::AppError,
 };
 
+/// One long-lived connection per process.
+///
+/// Opening a SQLite file is not free: it re-reads the schema, re-applies the
+/// pragmas and re-opens the WAL. The first version of this module opened a
+/// fresh connection inside every method, so a single scan paid that cost
+/// hundreds of times. The connection is kept behind a mutex instead, which
+/// also serialises writes so concurrent commands cannot fight over the WAL.
 #[derive(Debug)]
 pub struct Database {
     path: PathBuf,
+    connection: Mutex<Connection>,
 }
 
 // ---------------------------------------------------------------- records
@@ -28,6 +40,9 @@ pub struct AgentTargetRecord {
     pub name: String,
     pub provider: String,
     pub detected: bool,
+    /// 强信号：在 PATH 里找到了该 Agent 的可执行文件（真的装了）。
+    /// `detected` 只说明默认目录存在 —— 卸载后残留的空目录也会让它是 true。
+    pub installed: bool,
     pub executable_path: Option<String>,
     pub last_warning: Option<String>,
     pub last_scanned_at: Option<i64>,
@@ -105,11 +120,14 @@ pub struct LinkRecord {
 /// Version 1 was produced by the pre-rebuild application generation: it stored an
 /// incompatible `agent_targets` shape (extra NOT NULL columns such as
 /// `capabilities_json`), keyed `skill_tags` by `skill_id`, and carried a dozen
-/// tables for features that no longer exist. Databases at an older version are
-/// reset on open: every row they hold is either dead (legacy features) or
-/// regenerable (the agent catalog re-registers itself on every start, and
-/// discovery re-scans on demand).
-const SCHEMA_VERSION: &str = "2";
+/// tables for features that no longer exist. Version 1 databases are reset on
+/// open: every row they hold is either dead (legacy features) or regenerable.
+///
+/// Version 3 added `skill_instances.content_signature`, the cheap
+/// (path, size, mtime) fingerprint that lets a rescan skip re-hashing files
+/// whose bytes cannot have changed. It is added in place so governance data
+/// survives the upgrade.
+const SCHEMA_VERSION: &str = "4";
 
 /// Tables owned by the current layout, in dependency-safe drop order.
 const TABLE_NAMES: &[&str] = &[
@@ -141,19 +159,142 @@ const LEGACY_TABLE_NAMES: &[&str] = &[
     "sync_plans",
 ];
 
-/// Reset a database that was laid out by an older application generation.
+/// Idempotent layout for [`SCHEMA_VERSION`]: safe to run on every start.
+const SCHEMA_SQL: &str = "
+PRAGMA foreign_keys = ON;
+
+CREATE TABLE IF NOT EXISTS schema_meta (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS agent_targets (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    provider TEXT NOT NULL,
+    detected INTEGER NOT NULL DEFAULT 0,
+    installed INTEGER NOT NULL DEFAULT 0,
+    executable_path TEXT,
+    last_warning TEXT,
+    last_scanned_at INTEGER,
+    updated_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS discovery_roots (
+    id TEXT PRIMARY KEY,
+    agent_id TEXT NOT NULL,
+    scope TEXT NOT NULL CHECK(scope IN ('user', 'project')),
+    configured_path TEXT NOT NULL,
+    canonical_path TEXT,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    is_default INTEGER NOT NULL DEFAULT 0,
+    last_warning TEXT,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    FOREIGN KEY(agent_id) REFERENCES agent_targets(id) ON DELETE CASCADE,
+    UNIQUE(agent_id, scope, configured_path)
+);
+
+CREATE TABLE IF NOT EXISTS skill_instances (
+    id TEXT PRIMARY KEY,
+    agent_id TEXT NOT NULL,
+    root_id TEXT NOT NULL,
+    scope TEXT NOT NULL CHECK(scope IN ('user', 'project')),
+    path TEXT NOT NULL,
+    name TEXT NOT NULL,
+    description TEXT NOT NULL,
+    content_hash TEXT NOT NULL,
+    content_signature TEXT,
+    script_count INTEGER NOT NULL DEFAULT 0,
+    state TEXT NOT NULL CHECK(state IN ('unmanaged', 'missing')),
+    first_discovered_at INTEGER NOT NULL,
+    last_discovered_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    FOREIGN KEY(agent_id) REFERENCES agent_targets(id) ON DELETE CASCADE,
+    FOREIGN KEY(root_id) REFERENCES discovery_roots(id) ON DELETE CASCADE,
+    UNIQUE(agent_id, scope, path)
+);
+
+CREATE INDEX IF NOT EXISTS idx_skill_instances_root
+ON skill_instances(root_id, state);
+
+-- governance: keyed by canonical skill path, not by a library copy
+CREATE TABLE IF NOT EXISTS groups (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL COLLATE NOCASE UNIQUE,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS skill_groups (
+    skill_path TEXT PRIMARY KEY,
+    group_id TEXT NOT NULL,
+    updated_at INTEGER NOT NULL,
+    FOREIGN KEY(group_id) REFERENCES groups(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS tags (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL COLLATE NOCASE UNIQUE,
+    is_system INTEGER NOT NULL DEFAULT 0,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS skill_tags (
+    skill_path TEXT NOT NULL,
+    tag_id TEXT NOT NULL,
+    PRIMARY KEY(skill_path, tag_id),
+    FOREIGN KEY(tag_id) REFERENCES tags(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_skill_tags_tag ON skill_tags(tag_id);
+
+CREATE TABLE IF NOT EXISTS skill_notes (
+    skill_path TEXT PRIMARY KEY,
+    note TEXT NOT NULL,
+    updated_at INTEGER NOT NULL
+);
+
+-- write-back: symlinks created by this app
+CREATE TABLE IF NOT EXISTS links (
+    id TEXT PRIMARY KEY,
+    skill_path TEXT NOT NULL,
+    target_root_id TEXT NOT NULL,
+    link_path TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    FOREIGN KEY(target_root_id) REFERENCES discovery_roots(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_links_path ON links(link_path);
+
+INSERT OR IGNORE INTO tags (id, name, is_system, created_at, updated_at)
+VALUES
+    ('tag-coding', '编码', 1, 0, 0),
+    ('tag-ui', 'UI', 1, 0, 0),
+    ('tag-office', '办公', 1, 0, 0),
+    ('tag-review', 'Review', 1, 0, 0);
+";
+
+/// Bring an existing database up to [`SCHEMA_VERSION`].
 ///
 /// Fresh files contain no tables yet and are left untouched; databases already at
-/// [`SCHEMA_VERSION`] keep their rows. Everything else (the pre-rebuild layout) is
-/// dropped and recreated by the `CREATE TABLE IF NOT EXISTS` batch that follows.
-fn reset_outdated_database(connection: &Connection) -> Result<(), AppError> {
+/// [`SCHEMA_VERSION`] keep their rows. Version 1 (the pre-rebuild layout) is
+/// dropped and recreated by the `CREATE TABLE IF NOT EXISTS` batch that follows,
+/// while later versions are evolved in place so governance metadata survives.
+fn migrate(connection: &Connection) -> Result<(), AppError> {
     let tables = table_names(connection)?;
     if tables.is_empty() {
         // Brand-new database file: nothing to migrate.
         return Ok(());
     }
-    if stored_schema_version(connection)?.as_deref() == Some(SCHEMA_VERSION) {
-        return Ok(());
+
+    match stored_schema_version(connection)?.as_deref() {
+        Some(SCHEMA_VERSION) => return Ok(()),
+        Some("2") => return upgrade_v2_to_v3(connection),
+        Some("3") => return upgrade_v3_to_v4(connection),
+        Some(_) => {}
+        None => {}
     }
 
     // Foreign keys are re-enabled below; `connect` turns them on for every session.
@@ -162,6 +303,47 @@ fn reset_outdated_database(connection: &Connection) -> Result<(), AppError> {
         connection.execute(&format!("DROP TABLE IF EXISTS {name}"), [])?;
     }
     connection.execute_batch("PRAGMA foreign_keys = ON;")?;
+    Ok(())
+}
+
+/// Add the rescan fingerprint column without touching existing rows.
+fn upgrade_v2_to_v3(connection: &Connection) -> Result<(), AppError> {
+    let columns = column_names(connection, "skill_instances")?;
+    if !columns.iter().any(|name| name == "content_signature") {
+        connection.execute(
+            "ALTER TABLE skill_instances ADD COLUMN content_signature TEXT",
+            [],
+        )?;
+    }
+    connection.execute(
+        "INSERT INTO schema_meta (key, value) VALUES ('schema_version', ?1)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        params![SCHEMA_VERSION],
+    )?;
+    Ok(())
+}
+
+/// Split "detected" into two signals: a leftover directory keeps `detected`
+/// true, but only a real executable sets `installed`.
+fn upgrade_v3_to_v4(connection: &Connection) -> Result<(), AppError> {
+    let columns = column_names(connection, "agent_targets")?;
+    if !columns.iter().any(|name| name == "installed") {
+        connection.execute(
+            "ALTER TABLE agent_targets ADD COLUMN installed INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
+    }
+    // 旧库没有可执行文件信息时只能按现有 executable_path 回填：PATH 里真有可执行
+    // 文件的行会被下一次 ensure_targets_registered 刷新成 1。
+    connection.execute(
+        "UPDATE agent_targets SET installed = CASE WHEN executable_path IS NOT NULL THEN 1 ELSE 0 END",
+        [],
+    )?;
+    connection.execute(
+        "INSERT INTO schema_meta (key, value) VALUES ('schema_version', ?1)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        params![SCHEMA_VERSION],
+    )?;
     Ok(())
 }
 
@@ -190,148 +372,62 @@ fn table_names(connection: &Connection) -> Result<Vec<String>, AppError> {
     names.collect::<Result<Vec<_>, _>>().map_err(AppError::from)
 }
 
+fn column_names(connection: &Connection, table: &str) -> Result<Vec<String>, AppError> {
+    let mut statement = connection.prepare(&format!("PRAGMA table_info({table})"))?;
+    let names = statement.query_map([], |row| row.get::<_, String>(1))?;
+    names.collect::<Result<Vec<_>, _>>().map_err(AppError::from)
+}
+
 impl Database {
     pub fn initialize(path: impl AsRef<Path>) -> Result<Self, AppError> {
-        let database = Self {
-            path: path.as_ref().to_path_buf(),
-        };
+        let database = Self::open(path)?;
+        {
+            let connection = database.lock()?;
+            migrate(&connection)?;
+            connection.execute_batch(SCHEMA_SQL)?;
+            connection.execute(
+                "INSERT INTO schema_meta (key, value)
+                 VALUES ('schema_version', ?1)
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                params![SCHEMA_VERSION],
+            )?;
+        }
 
-        let connection = database.connect()?;
-        reset_outdated_database(&connection)?;
+        Ok(database)
+    }
+
+    /// Open the database file once and keep the connection for the process.
+    fn open(path: impl AsRef<Path>) -> Result<Self, AppError> {
+        let connection = Connection::open(path.as_ref())?;
         connection.execute_batch(
             "
             PRAGMA foreign_keys = ON;
             PRAGMA journal_mode = WAL;
-
-            CREATE TABLE IF NOT EXISTS schema_meta (
-                key TEXT PRIMARY KEY,
-                value TEXT NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS agent_targets (
-                id TEXT PRIMARY KEY,
-                name TEXT NOT NULL,
-                provider TEXT NOT NULL,
-                detected INTEGER NOT NULL DEFAULT 0,
-                executable_path TEXT,
-                last_warning TEXT,
-                last_scanned_at INTEGER,
-                updated_at INTEGER NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS discovery_roots (
-                id TEXT PRIMARY KEY,
-                agent_id TEXT NOT NULL,
-                scope TEXT NOT NULL CHECK(scope IN ('user', 'project')),
-                configured_path TEXT NOT NULL,
-                canonical_path TEXT,
-                enabled INTEGER NOT NULL DEFAULT 1,
-                is_default INTEGER NOT NULL DEFAULT 0,
-                last_warning TEXT,
-                created_at INTEGER NOT NULL,
-                updated_at INTEGER NOT NULL,
-                FOREIGN KEY(agent_id) REFERENCES agent_targets(id) ON DELETE CASCADE,
-                UNIQUE(agent_id, scope, configured_path)
-            );
-
-            CREATE TABLE IF NOT EXISTS skill_instances (
-                id TEXT PRIMARY KEY,
-                agent_id TEXT NOT NULL,
-                root_id TEXT NOT NULL,
-                scope TEXT NOT NULL CHECK(scope IN ('user', 'project')),
-                path TEXT NOT NULL,
-                name TEXT NOT NULL,
-                description TEXT NOT NULL,
-                content_hash TEXT NOT NULL,
-                script_count INTEGER NOT NULL DEFAULT 0,
-                state TEXT NOT NULL CHECK(state IN ('unmanaged', 'missing')),
-                first_discovered_at INTEGER NOT NULL,
-                last_discovered_at INTEGER NOT NULL,
-                updated_at INTEGER NOT NULL,
-                FOREIGN KEY(agent_id) REFERENCES agent_targets(id) ON DELETE CASCADE,
-                FOREIGN KEY(root_id) REFERENCES discovery_roots(id) ON DELETE CASCADE,
-                UNIQUE(agent_id, scope, path)
-            );
-
-            CREATE INDEX IF NOT EXISTS idx_skill_instances_root
-            ON skill_instances(root_id, state);
-
-            -- governance: keyed by canonical skill path, not by a library copy
-            CREATE TABLE IF NOT EXISTS groups (
-                id TEXT PRIMARY KEY,
-                name TEXT NOT NULL COLLATE NOCASE UNIQUE,
-                created_at INTEGER NOT NULL,
-                updated_at INTEGER NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS skill_groups (
-                skill_path TEXT PRIMARY KEY,
-                group_id TEXT NOT NULL,
-                updated_at INTEGER NOT NULL,
-                FOREIGN KEY(group_id) REFERENCES groups(id) ON DELETE CASCADE
-            );
-
-            CREATE TABLE IF NOT EXISTS tags (
-                id TEXT PRIMARY KEY,
-                name TEXT NOT NULL COLLATE NOCASE UNIQUE,
-                is_system INTEGER NOT NULL DEFAULT 0,
-                created_at INTEGER NOT NULL,
-                updated_at INTEGER NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS skill_tags (
-                skill_path TEXT NOT NULL,
-                tag_id TEXT NOT NULL,
-                PRIMARY KEY(skill_path, tag_id),
-                FOREIGN KEY(tag_id) REFERENCES tags(id) ON DELETE CASCADE
-            );
-
-            CREATE INDEX IF NOT EXISTS idx_skill_tags_tag ON skill_tags(tag_id);
-
-            CREATE TABLE IF NOT EXISTS skill_notes (
-                skill_path TEXT PRIMARY KEY,
-                note TEXT NOT NULL,
-                updated_at INTEGER NOT NULL
-            );
-
-            -- write-back: symlinks created by this app
-            CREATE TABLE IF NOT EXISTS links (
-                id TEXT PRIMARY KEY,
-                skill_path TEXT NOT NULL,
-                target_root_id TEXT NOT NULL,
-                link_path TEXT NOT NULL,
-                created_at INTEGER NOT NULL,
-                FOREIGN KEY(target_root_id) REFERENCES discovery_roots(id) ON DELETE CASCADE
-            );
-
-            INSERT INTO schema_meta (key, value)
-            VALUES ('schema_version', '2')
-            ON CONFLICT(key) DO UPDATE SET value = excluded.value;
-
-            INSERT OR IGNORE INTO tags (id, name, is_system, created_at, updated_at)
-            VALUES
-                ('tag-coding', '编码', 1, 0, 0),
-                ('tag-ui', 'UI', 1, 0, 0),
-                ('tag-office', '办公', 1, 0, 0),
-                ('tag-review', 'Review', 1, 0, 0);
+            PRAGMA synchronous = NORMAL;
+            PRAGMA temp_store = MEMORY;
+            PRAGMA cache_size = -16000;
+            PRAGMA busy_timeout = 5000;
             ",
         )?;
 
-        Ok(database)
+        Ok(Self {
+            path: path.as_ref().to_path_buf(),
+            connection: Mutex::new(connection),
+        })
     }
 
     pub fn path(&self) -> &Path {
         &self.path
     }
 
-    fn connect(&self) -> Result<Connection, AppError> {
-        let connection = Connection::open(&self.path)?;
-        connection.execute_batch("PRAGMA foreign_keys = ON;")?;
-        Ok(connection)
+    fn lock(&self) -> Result<MutexGuard<'_, Connection>, AppError> {
+        self.connection.lock().map_err(|_| {
+            AppError::State("database connection lock was poisoned by a previous panic".to_string())
+        })
     }
 
     pub fn health_check(&self) -> Result<(), AppError> {
-        let connection = self.connect()?;
+        let connection = self.lock()?;
         let value: i64 = connection.query_row("SELECT 1", [], |row| row.get(0))?;
         if value != 1 {
             return Err(AppError::State(
@@ -344,9 +440,9 @@ impl Database {
     // ------------------------------------------------------ agent targets
 
     pub fn list_agent_targets(&self) -> Result<Vec<AgentTargetRecord>, AppError> {
-        let connection = self.connect()?;
+        let connection = self.lock()?;
         let mut statement = connection.prepare(
-            "SELECT id, name, provider, detected, executable_path, last_warning, last_scanned_at
+            "SELECT id, name, provider, detected, installed, executable_path, last_warning, last_scanned_at
              FROM agent_targets ORDER BY name",
         )?;
         let rows = statement.query_map([], map_agent_target)?;
@@ -358,15 +454,16 @@ impl Database {
         record: &AgentTargetRecord,
         timestamp: i64,
     ) -> Result<AgentTargetRecord, AppError> {
-        let connection = self.connect()?;
+        let connection = self.lock()?;
         connection.execute(
             "INSERT INTO agent_targets
-                (id, name, provider, detected, executable_path, last_warning, last_scanned_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                (id, name, provider, detected, installed, executable_path, last_warning, last_scanned_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
              ON CONFLICT(id) DO UPDATE SET
                 name = excluded.name,
                 provider = excluded.provider,
                 detected = excluded.detected,
+                installed = excluded.installed,
                 executable_path = excluded.executable_path,
                 last_warning = excluded.last_warning,
                 last_scanned_at = excluded.last_scanned_at,
@@ -376,6 +473,7 @@ impl Database {
                 record.name,
                 record.provider,
                 i64::from(record.detected),
+                i64::from(record.installed),
                 record.executable_path,
                 record.last_warning,
                 record.last_scanned_at,
@@ -388,7 +486,7 @@ impl Database {
     // ------------------------------------------------------ discovery roots
 
     pub fn list_discovery_roots(&self) -> Result<Vec<DiscoveryRootRecord>, AppError> {
-        let connection = self.connect()?;
+        let connection = self.lock()?;
         let mut statement = connection.prepare(
             "SELECT id, agent_id, scope, configured_path, canonical_path, enabled, is_default, last_warning
              FROM discovery_roots ORDER BY agent_id, scope, configured_path",
@@ -398,7 +496,7 @@ impl Database {
     }
 
     pub fn discovery_root(&self, id: &str) -> Result<Option<DiscoveryRootRecord>, AppError> {
-        let connection = self.connect()?;
+        let connection = self.lock()?;
         let record = connection
             .query_row(
                 "SELECT id, agent_id, scope, configured_path, canonical_path, enabled, is_default, last_warning
@@ -415,7 +513,7 @@ impl Database {
         record: &DiscoveryRootRecord,
         timestamp: i64,
     ) -> Result<DiscoveryRootRecord, AppError> {
-        let connection = self.connect()?;
+        let connection = self.lock()?;
         connection.execute(
             "INSERT INTO discovery_roots
                 (id, agent_id, scope, configured_path, canonical_path, enabled, is_default, last_warning, created_at, updated_at)
@@ -441,7 +539,7 @@ impl Database {
     }
 
     pub fn remove_discovery_root(&self, id: &str) -> Result<(), AppError> {
-        let connection = self.connect()?;
+        let connection = self.lock()?;
         connection.execute("DELETE FROM discovery_roots WHERE id = ?1", params![id])?;
         Ok(())
     }
@@ -449,7 +547,7 @@ impl Database {
     // ------------------------------------------------------ skill instances
 
     pub fn list_skill_instances(&self) -> Result<Vec<SkillInstanceRecord>, AppError> {
-        let connection = self.connect()?;
+        let connection = self.lock()?;
         let mut statement = connection.prepare(
             "SELECT id, agent_id, root_id, scope, path, name, description, content_hash,
                     script_count, state, first_discovered_at, last_discovered_at
@@ -463,7 +561,7 @@ impl Database {
         &self,
         path: &str,
     ) -> Result<Option<SkillInstanceRecord>, AppError> {
-        let connection = self.connect()?;
+        let connection = self.lock()?;
         let record = connection
             .query_row(
                 "SELECT id, agent_id, root_id, scope, path, name, description, content_hash,
@@ -476,6 +574,31 @@ impl Database {
         Ok(record)
     }
 
+    /// `path -> (content_hash, content_signature)` for every cached instance.
+    ///
+    /// A rescan compares the cheap on-disk fingerprint against the stored
+    /// signature and reuses the stored hash when they match, so unchanged
+    /// skills are never read byte for byte again.
+    pub fn skill_signatures(&self) -> Result<HashMap<String, (String, Option<String>)>, AppError> {
+        let connection = self.lock()?;
+        let mut statement = connection
+            .prepare("SELECT path, content_hash, content_signature FROM skill_instances")?;
+        let rows = statement.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<String>>(2)?,
+            ))
+        })?;
+
+        let mut signatures = HashMap::new();
+        for entry in rows {
+            let (path, hash, signature) = entry?;
+            signatures.insert(path, (hash, signature));
+        }
+        Ok(signatures)
+    }
+
     /// Replace the instance set of one root: new drafts are upserted, drafts that
     /// disappeared are kept as `missing` so the UI can show what went away.
     pub fn reconcile_root_instances(
@@ -484,7 +607,7 @@ impl Database {
         drafts: &[SkillInstanceDraft],
         timestamp: i64,
     ) -> Result<(), AppError> {
-        let mut connection = self.connect()?;
+        let mut connection = self.lock()?;
         let transaction = connection.transaction()?;
 
         let mut sql = String::from(
@@ -504,12 +627,14 @@ impl Database {
             transaction.execute(
                 "INSERT INTO skill_instances
                     (id, agent_id, root_id, scope, path, name, description, content_hash,
-                     script_count, state, first_discovered_at, last_discovered_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'unmanaged', ?10, ?10, ?10)
+                     content_signature, script_count, state, first_discovered_at,
+                     last_discovered_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'unmanaged', ?11, ?11, ?11)
                  ON CONFLICT(id) DO UPDATE SET
                     name = excluded.name,
                     description = excluded.description,
                     content_hash = excluded.content_hash,
+                    content_signature = excluded.content_signature,
                     script_count = excluded.script_count,
                     state = 'unmanaged',
                     last_discovered_at = excluded.last_discovered_at,
@@ -523,6 +648,7 @@ impl Database {
                     draft.name,
                     draft.description,
                     draft.content_hash,
+                    draft.content_signature,
                     draft.script_count,
                     timestamp
                 ],
@@ -536,7 +662,7 @@ impl Database {
     // ------------------------------------------------------ groups
 
     pub fn list_groups(&self) -> Result<Vec<GroupRecord>, AppError> {
-        let connection = self.connect()?;
+        let connection = self.lock()?;
         let mut statement = connection.prepare(
             "SELECT g.id, g.name, COUNT(sg.skill_path) AS skill_count
              FROM groups g
@@ -567,7 +693,7 @@ impl Database {
             crate::skills::hash_text(&format!("group\0{}", name.to_lowercase()))
         });
 
-        let connection = self.connect()?;
+        let connection = self.lock()?;
         connection.execute(
             "INSERT INTO groups (id, name, created_at, updated_at)
              VALUES (?1, ?2, ?3, ?3)
@@ -583,7 +709,7 @@ impl Database {
     }
 
     pub fn delete_group(&self, id: &str) -> Result<(), AppError> {
-        let connection = self.connect()?;
+        let connection = self.lock()?;
         connection.execute("DELETE FROM groups WHERE id = ?1", params![id])?;
         Ok(())
     }
@@ -595,7 +721,7 @@ impl Database {
         group_id: Option<&str>,
         timestamp: i64,
     ) -> Result<(), AppError> {
-        let connection = self.connect()?;
+        let connection = self.lock()?;
         match group_id {
             Some(group_id) => connection.execute(
                 "INSERT INTO skill_groups (skill_path, group_id, updated_at)
@@ -612,7 +738,7 @@ impl Database {
     }
 
     pub fn skill_group_assignments(&self) -> Result<Vec<(String, String)>, AppError> {
-        let connection = self.connect()?;
+        let connection = self.lock()?;
         let mut statement = connection.prepare("SELECT skill_path, group_id FROM skill_groups")?;
         let rows = statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
@@ -621,7 +747,7 @@ impl Database {
     // ------------------------------------------------------ tags
 
     pub fn list_tags(&self) -> Result<Vec<TagRecord>, AppError> {
-        let connection = self.connect()?;
+        let connection = self.lock()?;
         let mut statement = connection.prepare(
             "SELECT t.id, t.name, t.is_system, COUNT(st.skill_path) AS skill_count
              FROM tags t
@@ -650,7 +776,7 @@ impl Database {
             .clone()
             .unwrap_or_else(|| crate::skills::hash_text(&format!("tag\0{}", name.to_lowercase())));
 
-        let connection = self.connect()?;
+        let connection = self.lock()?;
         connection.execute(
             "INSERT INTO tags (id, name, is_system, created_at, updated_at)
              VALUES (?1, ?2, 0, ?3, ?3)
@@ -667,13 +793,13 @@ impl Database {
     }
 
     pub fn delete_tag(&self, id: &str) -> Result<(), AppError> {
-        let connection = self.connect()?;
+        let connection = self.lock()?;
         connection.execute("DELETE FROM tags WHERE id = ?1", params![id])?;
         Ok(())
     }
 
     pub fn set_skill_tags(&self, skill_path: &str, tag_ids: &[String]) -> Result<(), AppError> {
-        let mut connection = self.connect()?;
+        let mut connection = self.lock()?;
         let transaction = connection.transaction()?;
         transaction.execute(
             "DELETE FROM skill_tags WHERE skill_path = ?1",
@@ -690,7 +816,7 @@ impl Database {
     }
 
     pub fn skill_tag_assignments(&self) -> Result<Vec<(String, String)>, AppError> {
-        let connection = self.connect()?;
+        let connection = self.lock()?;
         let mut statement = connection.prepare("SELECT skill_path, tag_id FROM skill_tags")?;
         let rows = statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
@@ -705,7 +831,7 @@ impl Database {
         timestamp: i64,
     ) -> Result<SkillNoteRecord, AppError> {
         let note = note.trim();
-        let connection = self.connect()?;
+        let connection = self.lock()?;
         if note.is_empty() {
             connection.execute(
                 "DELETE FROM skill_notes WHERE skill_path = ?1",
@@ -727,7 +853,7 @@ impl Database {
     }
 
     pub fn list_skill_notes(&self) -> Result<Vec<SkillNoteRecord>, AppError> {
-        let connection = self.connect()?;
+        let connection = self.lock()?;
         let mut statement =
             connection.prepare("SELECT skill_path, note, updated_at FROM skill_notes")?;
         let rows = statement.query_map([], |row| {
@@ -743,7 +869,7 @@ impl Database {
     // ------------------------------------------------------ links (write-back)
 
     pub fn list_links(&self) -> Result<Vec<LinkRecord>, AppError> {
-        let connection = self.connect()?;
+        let connection = self.lock()?;
         let mut statement = connection.prepare(
             "SELECT l.id, l.skill_path, si.name, l.target_root_id, r.agent_id, r.configured_path,
                     l.link_path, l.created_at
@@ -757,7 +883,7 @@ impl Database {
     }
 
     pub fn link_by_id(&self, id: &str) -> Result<Option<LinkRecord>, AppError> {
-        let connection = self.connect()?;
+        let connection = self.lock()?;
         let record = connection
             .query_row(
                 "SELECT l.id, l.skill_path, si.name, l.target_root_id, r.agent_id, r.configured_path,
@@ -774,7 +900,7 @@ impl Database {
     }
 
     pub fn insert_link(&self, record: &LinkRecord) -> Result<(), AppError> {
-        let connection = self.connect()?;
+        let connection = self.lock()?;
         connection.execute(
             "INSERT INTO links (id, skill_path, target_root_id, link_path, created_at)
              VALUES (?1, ?2, ?3, ?4, ?5)
@@ -791,28 +917,23 @@ impl Database {
     }
 
     pub fn delete_link(&self, id: &str) -> Result<(), AppError> {
-        let connection = self.connect()?;
+        let connection = self.lock()?;
         connection.execute("DELETE FROM links WHERE id = ?1", params![id])?;
         Ok(())
     }
 
-    /// Whether this app already created a write-back link at exactly this path.
-    pub fn link_exists_at_path(&self, link_path: &str) -> Result<bool, AppError> {
-        let connection = self.connect()?;
-        let exists = connection
-            .query_row(
-                "SELECT EXISTS(SELECT 1 FROM links WHERE link_path = ?1)",
-                params![link_path],
-                |row| row.get::<_, i64>(0),
-            )
-            .optional()?
-            .unwrap_or(0);
-        Ok(exists != 0)
+    /// Every link path this app created, loaded once per scan instead of one
+    /// query per symlink entry found on disk.
+    pub fn link_paths(&self) -> Result<HashSet<String>, AppError> {
+        let connection = self.lock()?;
+        let mut statement = connection.prepare("SELECT link_path FROM links")?;
+        let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+        Ok(rows.collect::<Result<HashSet<_>, _>>()?)
     }
 
     #[cfg(test)]
     pub fn link_count(&self) -> Result<i64, AppError> {
-        let connection = self.connect()?;
+        let connection = self.lock()?;
         Ok(connection.query_row("SELECT COUNT(*) FROM links", [], |row| row.get(0))?)
     }
 }
@@ -825,9 +946,10 @@ fn map_agent_target(row: &Row<'_>) -> rusqlite::Result<AgentTargetRecord> {
         name: row.get(1)?,
         provider: row.get(2)?,
         detected: row.get::<_, i64>(3)? != 0,
-        executable_path: row.get(4)?,
-        last_warning: row.get(5)?,
-        last_scanned_at: row.get(6)?,
+        installed: row.get::<_, i64>(4)? != 0,
+        executable_path: row.get(5)?,
+        last_warning: row.get(6)?,
+        last_scanned_at: row.get(7)?,
     })
 }
 
@@ -898,6 +1020,7 @@ mod tests {
             name: "Claude Code".to_string(),
             provider: "Anthropic".to_string(),
             detected: false,
+            installed: false,
             executable_path: None,
             last_warning: None,
             last_scanned_at: None,
@@ -964,7 +1087,7 @@ mod tests {
         db.upsert_agent_target(&target(), now)
             .expect("target should persist on a reset database");
 
-        let connection = db.connect().expect("connection should open");
+        let connection = db.lock().expect("connection should open");
         assert_eq!(
             stored_schema_version(&connection).expect("version should be readable"),
             Some(SCHEMA_VERSION.to_string()),
@@ -1017,6 +1140,81 @@ mod tests {
         );
         db.upsert_agent_target(&target(), now)
             .expect("target write should still work after re-initialize");
+    }
+
+    /// Version 3 only adds a column: upgrading must not cost the user their
+    /// groups, tags or notes.
+    #[test]
+    fn version_two_database_upgrades_in_place_and_keeps_governance() {
+        let directory = test_root("upgrade-v2");
+        fs::create_dir_all(&directory).expect("test directory should exist");
+        let path = directory.join("skills.sqlite3");
+
+        {
+            let connection = rusqlite::Connection::open(&path).expect("v2 file should open");
+            connection
+                .execute_batch(
+                    "
+                    CREATE TABLE schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+                    CREATE TABLE agent_targets (
+                        id TEXT PRIMARY KEY, name TEXT NOT NULL, provider TEXT NOT NULL,
+                        detected INTEGER NOT NULL DEFAULT 0, executable_path TEXT,
+                        last_warning TEXT, last_scanned_at INTEGER, updated_at INTEGER NOT NULL
+                    );
+                    CREATE TABLE discovery_roots (
+                        id TEXT PRIMARY KEY, agent_id TEXT NOT NULL, scope TEXT NOT NULL,
+                        configured_path TEXT NOT NULL, canonical_path TEXT,
+                        enabled INTEGER NOT NULL DEFAULT 1, is_default INTEGER NOT NULL DEFAULT 0,
+                        last_warning TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+                    );
+                    CREATE TABLE skill_instances (
+                        id TEXT PRIMARY KEY, agent_id TEXT NOT NULL, root_id TEXT NOT NULL,
+                        scope TEXT NOT NULL, path TEXT NOT NULL, name TEXT NOT NULL,
+                        description TEXT NOT NULL, content_hash TEXT NOT NULL,
+                        script_count INTEGER NOT NULL DEFAULT 0, state TEXT NOT NULL,
+                        first_discovered_at INTEGER NOT NULL, last_discovered_at INTEGER NOT NULL,
+                        updated_at INTEGER NOT NULL
+                    );
+                    CREATE TABLE groups (
+                        id TEXT PRIMARY KEY, name TEXT NOT NULL COLLATE NOCASE UNIQUE,
+                        created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+                    );
+                    INSERT INTO schema_meta (key, value) VALUES ('schema_version', '2');
+                    INSERT INTO groups (id, name, created_at, updated_at)
+                    VALUES ('g1', '催收工具', 1, 1);
+                    ",
+                )
+                .expect("v2 layout should be created");
+        }
+
+        let db = Database::initialize(&path).expect("upgrade should succeed");
+
+        // The connection lock is not reentrant: drop it before calling back
+        // into `db`, or the second lock waits forever.
+        {
+            let connection = db.lock().expect("connection should open");
+            assert_eq!(
+                stored_schema_version(&connection).expect("version should be readable"),
+                Some(SCHEMA_VERSION.to_string())
+            );
+            assert!(
+                column_names(&connection, "skill_instances")
+                    .expect("columns should be readable")
+                    .contains(&"content_signature".to_string()),
+                "the fingerprint column should be added in place"
+            );
+        }
+
+        assert!(
+            db.list_groups()
+                .expect("groups should list")
+                .iter()
+                .any(|group| group.name == "催收工具"),
+            "governance data must survive the upgrade"
+        );
+
+        drop(db);
+        let _ = fs::remove_dir_all(directory);
     }
 
     #[test]
@@ -1107,6 +1305,7 @@ mod tests {
             name: "demo-skill".to_string(),
             description: "Demo.".to_string(),
             content_hash: "abc".to_string(),
+            content_signature: "fingerprint".to_string(),
             script_count: 0,
         };
         db.reconcile_root_instances(&record.id, std::slice::from_ref(&draft), now)
@@ -1150,6 +1349,7 @@ mod tests {
             name: "demo-skill".to_string(),
             description: "Demo.".to_string(),
             content_hash: "abc".to_string(),
+            content_signature: "fingerprint".to_string(),
             script_count: 0,
         };
         db.reconcile_root_instances(&record.id, std::slice::from_ref(&draft), now)

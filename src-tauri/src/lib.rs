@@ -7,15 +7,67 @@ mod linker;
 mod logging;
 mod skills;
 
-use std::{fs, path::PathBuf};
+use std::{
+    fs,
+    path::PathBuf,
+    sync::{Arc, Mutex},
+};
 
+use agent_discovery::ScanSnapshot;
 use db::Database;
+use error::AppError;
 use logging::AppLog;
 use tauri::Manager;
 
 pub struct AppState {
-    db: Database,
-    log: AppLog,
+    db: Arc<Database>,
+    log: Arc<AppLog>,
+    /// Serialises scans: the background warm-up and a UI-triggered scan never
+    /// walk the filesystem at the same time.
+    scan_lock: Arc<Mutex<()>>,
+    /// Result of the most recent scan, served to the UI without rescanning.
+    scan_cache: Arc<Mutex<Option<ScanSnapshot>>>,
+}
+
+impl AppState {
+    /// The cached scan when one exists and no fresh pass was requested.
+    fn cached_scan(&self) -> Option<ScanSnapshot> {
+        self.scan_cache
+            .lock()
+            .ok()
+            .and_then(|guard| guard.as_ref().cloned())
+    }
+
+    /// Serve the cached scan, or walk the disk when there is none (yet).
+    ///
+    /// The UI calls this on every mount and React's strict mode calls it twice
+    /// in development; the cache means the second call costs nothing and the
+    /// startup scan is never repeated while the user is waiting.
+    pub fn scan(&self, force: bool, timestamp: i64) -> Result<ScanSnapshot, AppError> {
+        if !force {
+            if let Some(cached) = self.cached_scan() {
+                return Ok(cached);
+            }
+        }
+
+        let _guard = self
+            .scan_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        // Another thread may have finished the scan while we waited for the lock.
+        if !force {
+            if let Some(cached) = self.cached_scan() {
+                return Ok(cached);
+            }
+        }
+
+        let snapshot = agent_discovery::scan_all(&self.db, timestamp)?;
+        if let Ok(mut guard) = self.scan_cache.lock() {
+            *guard = Some(snapshot.clone());
+        }
+        Ok(snapshot)
+    }
 }
 
 pub fn run() {
@@ -29,11 +81,47 @@ pub fn run() {
                 .unwrap_or(app_data_dir);
             fs::create_dir_all(&app_data_dir)?;
 
-            let log = AppLog::new(app_data_dir.join("skills-manager.log"))?;
-            let db = Database::initialize(app_data_dir.join("skills-manager.sqlite3"))?;
+            let log = Arc::new(AppLog::new(app_data_dir.join("skills-manager.log"))?);
+            let db = Arc::new(Database::initialize(
+                app_data_dir.join("skills-manager.sqlite3"),
+            )?);
             agent_discovery::ensure_targets_registered(&db, now())?;
-            if let Err(error) = agent_discovery::scan_all(&db, now()) {
-                let _ = log.write("warn", "initial_scan_failed", &error.to_string());
+
+            let scan_lock = Arc::new(Mutex::new(()));
+            let scan_cache = Arc::new(Mutex::new(None));
+
+            // Warm the cache off the main thread: the window shows immediately
+            // and the first scan result is ready by the time the UI asks.
+            {
+                let db = Arc::clone(&db);
+                let log = Arc::clone(&log);
+                let scan_lock = Arc::clone(&scan_lock);
+                let scan_cache = Arc::clone(&scan_cache);
+                std::thread::spawn(move || {
+                    let _guard = scan_lock
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    match agent_discovery::scan_all(&db, now()) {
+                        Ok(snapshot) => {
+                            let _ = log.write(
+                                "info",
+                                "startup_scan_finished",
+                                &format!(
+                                    "{} roots scanned; {} skills found; {} warnings",
+                                    snapshot.roots.len(),
+                                    snapshot.instances.len(),
+                                    snapshot.warnings.len()
+                                ),
+                            );
+                            if let Ok(mut guard) = scan_cache.lock() {
+                                *guard = Some(snapshot);
+                            }
+                        }
+                        Err(error) => {
+                            let _ = log.write("warn", "startup_scan_failed", &error.to_string());
+                        }
+                    }
+                });
             }
 
             let _ = log.write(
@@ -42,7 +130,12 @@ pub fn run() {
                 &format!("Skills Manager {}", env!("CARGO_PKG_VERSION")),
             );
 
-            app.manage(AppState { db, log });
+            app.manage(AppState {
+                db,
+                log,
+                scan_lock,
+                scan_cache,
+            });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
