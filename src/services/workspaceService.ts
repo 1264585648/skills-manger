@@ -18,6 +18,14 @@ export interface AssignmentRecord {
   targetId: string;
 }
 
+/** Flattened view of the backend agent catalog (for project-root conventions). */
+export interface AgentCatalogEntry {
+  id: string;
+  name: string;
+  provider: string;
+  projectRoots: string[];
+}
+
 export const isTauriRuntime = (): boolean =>
   typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
@@ -36,61 +44,73 @@ const ensureDesktop = (): void => {
   }
 };
 
+/**
+ * Requests that are already in flight, keyed by command + arguments.
+ *
+ * React strict mode mounts effects twice in development and every page reloads
+ * itself after a mutation, so without this the same expensive command (a full
+ * disk scan, or seven governance queries) went to the backend twice back to
+ * back. Duplicate callers now share one request instead.
+ */
+const inFlight = new Map<string, Promise<unknown>>();
+
+const call = <T>(
+  command: string,
+  args?: Record<string, unknown>,
+  options: { share?: boolean } = {},
+): Promise<T> => {
+  ensureDesktop();
+
+  const key = options.share ? `${command}:${JSON.stringify(args ?? {})}` : null;
+  if (key) {
+    const pending = inFlight.get(key);
+    if (pending) return pending as Promise<T>;
+  }
+
+  const request = (async (): Promise<T> => {
+    try {
+      return await invoke<T>(command, args);
+    } catch (error) {
+      throw new Error(formatCommandError(error));
+    } finally {
+      if (key) inFlight.delete(key);
+    }
+  })();
+
+  if (key) inFlight.set(key, request);
+  return request;
+};
+
 export const workspaceService = {
   // ---------------------------------------------------------------- 发现
 
-  async scan(): Promise<ScanSnapshot> {
-    ensureDesktop();
-    try {
-      return await invoke<ScanSnapshot>("scan");
-    } catch (error) {
-      throw new Error(formatCommandError(error));
-    }
+  /** `force` walks the disk; the default serves the scan already cached by the backend. */
+  scan(force = false): Promise<ScanSnapshot> {
+    return call<ScanSnapshot>("scan", { force }, { share: !force });
   },
 
-  async listSkillInstances(): Promise<SkillInstanceRecord[]> {
-    ensureDesktop();
-    try {
-      return await invoke<SkillInstanceRecord[]>("list_skill_instances");
-    } catch (error) {
-      throw new Error(formatCommandError(error));
-    }
+  listAgentCatalog(): Promise<AgentCatalogEntry[]> {
+    return call<AgentCatalogEntry[]>("list_agent_catalog", undefined, { share: true });
   },
 
-  async listAgentTargets(): Promise<AgentTargetRecord[]> {
-    ensureDesktop();
-    try {
-      return await invoke<AgentTargetRecord[]>("list_agent_targets");
-    } catch (error) {
-      throw new Error(formatCommandError(error));
-    }
+  listSkillInstances(): Promise<SkillInstanceRecord[]> {
+    return call<SkillInstanceRecord[]>("list_skill_instances", undefined, { share: true });
   },
 
-  async listDiscoveryRoots(): Promise<DiscoveryRootRecord[]> {
-    ensureDesktop();
-    try {
-      return await invoke<DiscoveryRootRecord[]>("list_discovery_roots");
-    } catch (error) {
-      throw new Error(formatCommandError(error));
-    }
+  listAgentTargets(): Promise<AgentTargetRecord[]> {
+    return call<AgentTargetRecord[]>("list_agent_targets", undefined, { share: true });
   },
 
-  async addProjectRoot(agentId: string, path: string): Promise<DiscoveryRootRecord> {
-    ensureDesktop();
-    try {
-      return await invoke<DiscoveryRootRecord>("add_project_root", { agentId, path });
-    } catch (error) {
-      throw new Error(formatCommandError(error));
-    }
+  listDiscoveryRoots(): Promise<DiscoveryRootRecord[]> {
+    return call<DiscoveryRootRecord[]>("list_discovery_roots", undefined, { share: true });
   },
 
-  async removeProjectRoot(id: string): Promise<void> {
-    ensureDesktop();
-    try {
-      await invoke("remove_project_root", { id });
-    } catch (error) {
-      throw new Error(formatCommandError(error));
-    }
+  addProjectRoot(agentId: string, path: string): Promise<DiscoveryRootRecord> {
+    return call<DiscoveryRootRecord>("add_project_root", { agentId, path });
+  },
+
+  removeProjectRoot(id: string): Promise<void> {
+    return call<void>("remove_project_root", { id });
   },
 
   async pickSkillsDirectory(): Promise<string | null> {
@@ -106,140 +126,65 @@ export const workspaceService = {
 
   // ---------------------------------------------------------------- 治理
 
-  async listGroups(): Promise<GroupRecord[]> {
-    ensureDesktop();
-    try {
-      return await invoke<GroupRecord[]>("list_groups");
-    } catch (error) {
-      throw new Error(formatCommandError(error));
-    }
+  listGroups(): Promise<GroupRecord[]> {
+    return call<GroupRecord[]>("list_groups", undefined, { share: true });
   },
 
-  async upsertGroup(name: string, id?: string): Promise<GroupRecord> {
-    ensureDesktop();
-    try {
-      return await invoke<GroupRecord>("upsert_group", { draft: { id: id ?? null, name } });
-    } catch (error) {
-      throw new Error(formatCommandError(error));
-    }
+  upsertGroup(name: string, id?: string): Promise<GroupRecord> {
+    return call<GroupRecord>("upsert_group", { draft: { id: id ?? null, name } });
   },
 
-  async deleteGroup(id: string): Promise<void> {
-    ensureDesktop();
-    try {
-      await invoke("delete_group", { id });
-    } catch (error) {
-      throw new Error(formatCommandError(error));
-    }
+  deleteGroup(id: string): Promise<void> {
+    return call<void>("delete_group", { id });
   },
 
-  async setSkillGroup(skillPath: string, groupId: string | null): Promise<void> {
-    ensureDesktop();
-    try {
-      await invoke("set_skill_group", { skillPath, groupId });
-    } catch (error) {
-      throw new Error(formatCommandError(error));
-    }
+  setSkillGroup(skillPath: string, groupId: string | null): Promise<void> {
+    return call<void>("set_skill_group", { skillPath, groupId });
   },
 
-  async listGroupAssignments(): Promise<AssignmentRecord[]> {
-    ensureDesktop();
-    try {
-      return await invoke<AssignmentRecord[]>("list_skill_group_assignments");
-    } catch (error) {
-      throw new Error(formatCommandError(error));
-    }
+  listGroupAssignments(): Promise<AssignmentRecord[]> {
+    return call<AssignmentRecord[]>("list_skill_group_assignments", undefined, { share: true });
   },
 
-  async listTags(): Promise<TagRecord[]> {
-    ensureDesktop();
-    try {
-      return await invoke<TagRecord[]>("list_tags");
-    } catch (error) {
-      throw new Error(formatCommandError(error));
-    }
+  listTags(): Promise<TagRecord[]> {
+    return call<TagRecord[]>("list_tags", undefined, { share: true });
   },
 
-  async upsertTag(name: string, id?: string): Promise<TagRecord> {
-    ensureDesktop();
-    try {
-      return await invoke<TagRecord>("upsert_tag", { draft: { id: id ?? null, name } });
-    } catch (error) {
-      throw new Error(formatCommandError(error));
-    }
+  upsertTag(name: string, id?: string): Promise<TagRecord> {
+    return call<TagRecord>("upsert_tag", { draft: { id: id ?? null, name } });
   },
 
-  async deleteTag(id: string): Promise<void> {
-    ensureDesktop();
-    try {
-      await invoke("delete_tag", { id });
-    } catch (error) {
-      throw new Error(formatCommandError(error));
-    }
+  deleteTag(id: string): Promise<void> {
+    return call<void>("delete_tag", { id });
   },
 
-  async setSkillTags(skillPath: string, tagIds: string[]): Promise<void> {
-    ensureDesktop();
-    try {
-      await invoke("set_skill_tags", { skillPath, tagIds });
-    } catch (error) {
-      throw new Error(formatCommandError(error));
-    }
+  setSkillTags(skillPath: string, tagIds: string[]): Promise<void> {
+    return call<void>("set_skill_tags", { skillPath, tagIds });
   },
 
-  async listTagAssignments(): Promise<AssignmentRecord[]> {
-    ensureDesktop();
-    try {
-      return await invoke<AssignmentRecord[]>("list_skill_tag_assignments");
-    } catch (error) {
-      throw new Error(formatCommandError(error));
-    }
+  listTagAssignments(): Promise<AssignmentRecord[]> {
+    return call<AssignmentRecord[]>("list_skill_tag_assignments", undefined, { share: true });
   },
 
-  async setSkillNote(skillPath: string, note: string): Promise<SkillNoteRecord> {
-    ensureDesktop();
-    try {
-      return await invoke<SkillNoteRecord>("set_skill_note", { skillPath, note });
-    } catch (error) {
-      throw new Error(formatCommandError(error));
-    }
+  setSkillNote(skillPath: string, note: string): Promise<SkillNoteRecord> {
+    return call<SkillNoteRecord>("set_skill_note", { skillPath, note });
   },
 
-  async listSkillNotes(): Promise<SkillNoteRecord[]> {
-    ensureDesktop();
-    try {
-      return await invoke<SkillNoteRecord[]>("list_skill_notes");
-    } catch (error) {
-      throw new Error(formatCommandError(error));
-    }
+  listSkillNotes(): Promise<SkillNoteRecord[]> {
+    return call<SkillNoteRecord[]>("list_skill_notes", undefined, { share: true });
   },
 
   // ---------------------------------------------------------------- 写回
 
-  async linkSkill(skillPath: string, targetRootId: string): Promise<LinkOutcome> {
-    ensureDesktop();
-    try {
-      return await invoke<LinkOutcome>("link_skill", { skillPath, targetRootId });
-    } catch (error) {
-      throw new Error(formatCommandError(error));
-    }
+  linkSkill(skillPath: string, targetRootId: string): Promise<LinkOutcome> {
+    return call<LinkOutcome>("link_skill", { skillPath, targetRootId });
   },
 
-  async unlinkSkill(linkId: string): Promise<LinkRecord> {
-    ensureDesktop();
-    try {
-      return await invoke<LinkRecord>("unlink_skill", { linkId });
-    } catch (error) {
-      throw new Error(formatCommandError(error));
-    }
+  unlinkSkill(linkId: string): Promise<LinkRecord> {
+    return call<LinkRecord>("unlink_skill", { linkId });
   },
 
-  async listLinks(): Promise<LinkRecord[]> {
-    ensureDesktop();
-    try {
-      return await invoke<LinkRecord[]>("list_links");
-    } catch (error) {
-      throw new Error(formatCommandError(error));
-    }
+  listLinks(): Promise<LinkRecord[]> {
+    return call<LinkRecord[]>("list_links", undefined, { share: true });
   },
 };

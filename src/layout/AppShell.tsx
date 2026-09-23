@@ -1,44 +1,23 @@
 import type { ReactNode } from "react";
-import type { PageKey } from "../types/domain";
 
-const navigation: Array<{ id: PageKey; label: string; icon: string; hint: string }> = [
-  { id: "discover", label: "发现", icon: "⌕", hint: "扫描 Agent 与项目目录" },
-  { id: "govern", label: "治理", icon: "☰", hint: "分组 / 标签 / 中文简介" },
-  { id: "writeback", label: "写回", icon: "↔", hint: "软连接跨 Agent 写入" },
-];
-
-export function AppShell({ activePage, onNavigate, children }: { activePage: PageKey; onNavigate: (page: PageKey) => void; children: ReactNode }) {
+/**
+ * 顶栏 + 内容区。
+ *
+ * 三步导航被撤掉了：发现/治理/写回不再是三个页面，而是同一屏里的三个区域，
+ * 顶栏因此只保留品牌和全局状态，不再承担导航职责。
+ */
+export function AppShell({ children }: { children: ReactNode }) {
   return (
     <div className="app-shell">
-      <aside className="sidebar">
+      <header className="topbar">
         <div className="brand">
-          <span className="brand-mark" aria-hidden="true">✦</span>
-          <div>
-            <strong>Skills Manager</strong>
-            <span>发现 → 治理 → 写回</span>
-          </div>
+          <span className="brand-mark" aria-hidden="true">
+            ✦
+          </span>
+          <strong>Skills Control Center</strong>
         </div>
-        <nav className="primary-nav" aria-label="Primary">
-          {navigation.map((item) => (
-            <button
-              className={activePage === item.id ? "nav-item nav-item-active" : "nav-item"}
-              key={item.id}
-              onClick={() => onNavigate(item.id)}
-              type="button"
-            >
-              <span className="nav-icon" aria-hidden="true">{item.icon}</span>
-              <span className="nav-text">
-                <span>{item.label}</span>
-                <small>{item.hint}</small>
-              </span>
-            </button>
-          ))}
-        </nav>
-        <div className="sidebar-footer">
-          <span className="mini-badge">Local-first</span>
-          <span>软连接写回 · 不复制文件</span>
-        </div>
-      </aside>
+        <span className="topbar-note">软连接写回 · 不复制文件</span>
+      </header>
       <main className="app-content">{children}</main>
     </div>
   );

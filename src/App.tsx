@@ -1,28 +1,16 @@
-import { useState } from "react";
 import { AppShell } from "./layout/AppShell";
-import { DiscoverPage } from "./pages/DiscoverPage";
-import { GovernPage } from "./pages/GovernPage";
-import { WriteBackPage } from "./pages/WriteBackPage";
-import type { PageKey } from "./types/domain";
+import { WorkspacePage } from "./pages/WorkspacePage";
 
-const initialPage = (): PageKey => {
-  if (typeof window === "undefined") return "discover";
-  const requested = new URLSearchParams(window.location.search).get("page");
-  return requested === "govern" || requested === "writeback" ? requested : "discover";
-};
-
+/**
+ * 单页工作区：发现、治理、写回同屏完成。
+ *
+ * 三者原本是三个页面，切换即丢失选中状态并重载一遍数据；实际上用户要做的
+ * 只有一件事——把某个 Skill 装到某个 Agent 上，不需要一次流程。
+ */
 export default function App() {
-  const [activePage, setActivePage] = useState<PageKey>(initialPage);
-
   return (
-    <AppShell activePage={activePage} onNavigate={setActivePage}>
-      {activePage === "discover" ? (
-        <DiscoverPage onGovern={() => setActivePage("govern")} />
-      ) : null}
-      {activePage === "govern" ? (
-        <GovernPage onWriteBack={() => setActivePage("writeback")} />
-      ) : null}
-      {activePage === "writeback" ? <WriteBackPage /> : null}
+    <AppShell>
+      <WorkspacePage />
     </AppShell>
   );
 }

@@ -11,10 +11,6 @@ export function StatusPill({ children, tone = "gray" }: { children: ReactNode; t
   return <span className={`status-pill status-${tone}`}>{children}</span>;
 }
 
-export function PageHeader({ title, subtitle, actions }: { title: string; subtitle: string; actions?: ReactNode }) {
-  return <header className="page-header"><div><h1>{title}</h1><p>{subtitle}</p></div>{actions ? <div className="page-actions">{actions}</div> : null}</header>;
-}
-
 export function SearchField({ value, onChange, placeholder, inputRef }: { value: string; onChange: (value: string) => void; placeholder: string; inputRef?: RefObject<HTMLInputElement | null> }) {
   return (
     <label className="search-field">
@@ -22,10 +18,6 @@ export function SearchField({ value, onChange, placeholder, inputRef }: { value:
       <input ref={inputRef} value={value} onChange={(event) => onChange(event.target.value)} placeholder={placeholder} />
     </label>
   );
-}
-
-export function Toggle({ checked, onChange }: { checked: boolean; onChange: (checked: boolean) => void }) {
-  return <button className={`toggle ${checked ? "toggle-on" : ""}`} type="button" role="switch" aria-checked={checked} onClick={() => onChange(!checked)}><span /></button>;
 }
 
 export function EmptyState({ title, body, action }: { title: string; body: string; action?: ReactNode }) {

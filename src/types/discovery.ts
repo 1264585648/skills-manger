@@ -6,6 +6,8 @@ export interface AgentTargetRecord {
   name: string;
   provider: string;
   detected: boolean;
+  /** 强信号：PATH 里找到了可执行文件（真的装了）。detected 只代表目录存在。 */
+  installed: boolean;
   executablePath: string | null;
   lastWarning: string | null;
   lastScannedAt: number | null;
