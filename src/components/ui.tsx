@@ -1,32 +1,170 @@
 import { useEffect, useState } from "react";
 import type { ButtonHTMLAttributes, ReactNode, RefObject } from "react";
+import { IconClose } from "./icons";
 
-type Tone = "green" | "amber" | "red" | "blue" | "gray";
+type Tone = "green" | "amber" | "red" | "blue" | "gray" | "purple";
 
-export function Button({ children, className = "", variant = "secondary", ...props }: ButtonHTMLAttributes<HTMLButtonElement> & { variant?: "primary" | "secondary" | "ghost" }) {
-  return <button className={`button button-${variant} ${className}`.trim()} type="button" {...props}>{children}</button>;
-}
-
-export function StatusPill({ children, tone = "gray" }: { children: ReactNode; tone?: Tone }) {
-  return <span className={`status-pill status-${tone}`}>{children}</span>;
-}
-
-export function SearchField({ value, onChange, placeholder, inputRef }: { value: string; onChange: (value: string) => void; placeholder: string; inputRef?: RefObject<HTMLInputElement | null> }) {
+export function Button({
+  children,
+  className = "",
+  variant = "secondary",
+  ...props
+}: ButtonHTMLAttributes<HTMLButtonElement> & {
+  variant?: "primary" | "secondary" | "ghost" | "danger";
+}) {
   return (
-    <label className="search-field">
-      <span aria-hidden="true">⌕</span>
-      <input ref={inputRef} value={value} onChange={(event) => onChange(event.target.value)} placeholder={placeholder} />
-    </label>
+    <button
+      className={`button button-${variant} ${className}`.trim()}
+      type="button"
+      {...props}
+    >
+      {children}
+    </button>
   );
 }
 
-export function EmptyState({ title, body, action }: { title: string; body: string; action?: ReactNode }) {
+export function StatusPill({
+  children,
+  tone = "gray",
+}: {
+  children: ReactNode;
+  tone?: Tone;
+}) {
+  return <span className={`status-pill status-${tone}`}>{children}</span>;
+}
+
+export function Switch({
+  checked,
+  onChange,
+  disabled,
+  title,
+  ariaLabel,
+}: {
+  checked: boolean;
+  onChange?: (checked: boolean) => void;
+  disabled?: boolean;
+  title?: string;
+  ariaLabel?: string;
+}) {
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={checked}
+      aria-label={ariaLabel}
+      title={title}
+      disabled={disabled}
+      className={`toggle-switch ${checked ? "toggle-switch-on" : ""}`}
+      onClick={() => onChange?.(!checked)}
+    >
+      <span className="toggle-switch-thumb" />
+    </button>
+  );
+}
+
+export function SearchField({
+  value,
+  onChange,
+  placeholder,
+  inputRef,
+}: {
+  value: string;
+  onChange: (value: string) => void;
+  placeholder: string;
+  inputRef?: RefObject<HTMLInputElement | null>;
+}) {
+  return (
+    <span className="search-field">
+      <span className="search-icon" aria-hidden="true">
+        ⌕
+      </span>
+      <input
+        ref={inputRef}
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+        placeholder={placeholder}
+      />
+      {value ? (
+        <button
+          type="button"
+          className="search-clear"
+          aria-label="清空搜索"
+          onClick={() => {
+            onChange("");
+            inputRef?.current?.focus();
+          }}
+        >
+          ×
+        </button>
+      ) : (
+        <kbd className="search-kbd">/</kbd>
+      )}
+    </span>
+  );
+}
+
+export function EmptyState({
+  title,
+  body,
+  action,
+}: {
+  title: string;
+  body: string;
+  action?: ReactNode;
+}) {
   return (
     <div className="empty-state">
       <div className="empty-icon">◇</div>
       <strong>{title}</strong>
       <p>{body}</p>
       {action}
+    </div>
+  );
+}
+
+export function Modal({
+  open,
+  onClose,
+  title,
+  children,
+}: {
+  open: boolean;
+  onClose: () => void;
+  title: string;
+  children: ReactNode;
+}) {
+  useEffect(() => {
+    if (!open) return;
+    const handleKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", handleKey);
+    return () => window.removeEventListener("keydown", handleKey);
+  }, [open, onClose]);
+
+  if (!open) return null;
+
+  return (
+    <div className="modal-backdrop" onClick={onClose}>
+      <div
+        className="modal-panel"
+        role="dialog"
+        aria-modal="true"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="modal-header">
+          <h3>{title}</h3>
+          <button
+            type="button"
+            className="modal-close"
+            onClick={onClose}
+            aria-label="关闭"
+          >
+            <IconClose />
+          </button>
+        </div>
+        <div className="modal-body">{children}</div>
+      </div>
     </div>
   );
 }
@@ -83,7 +221,11 @@ export function ErrorNotice({ error, onRetry, onDismiss }: ErrorNoticeProps) {
       </div>
       <div className="notice-actions">
         {detail ? (
-          <button type="button" className="notice-action" onClick={() => setExpanded((value) => !value)}>
+          <button
+            type="button"
+            className="notice-action"
+            onClick={() => setExpanded((value) => !value)}
+          >
             {expanded ? "收起详情" : "展开详情"}
           </button>
         ) : null}

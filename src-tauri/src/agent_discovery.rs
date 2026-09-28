@@ -128,6 +128,33 @@ fn stable_instance_id(agent_id: &str, root_id: &str, scope: &str, canonical_path
     skills::hash_text(&format!("{agent_id}\0{root_id}\0{scope}\0{canonical_path}"))
 }
 
+pub const VAULT_AGENT_ID: &str = "skills-manager-vault";
+pub const VAULT_ROOT_ID: &str = "vault-root";
+
+pub fn ensure_vault_root(db: &Database, timestamp: i64) -> Result<(), AppError> {
+    let vault_skills = db.vault_skills_dir();
+    fs::create_dir_all(&vault_skills)?;
+    let canonical = match vault_skills.canonicalize() {
+        Ok(path) => path,
+        Err(_) => vault_skills.clone(),
+    };
+    let canonical_text = canonical.to_string_lossy().into_owned();
+    let configured_text = vault_skills.to_string_lossy().into_owned();
+
+    let record = DiscoveryRootRecord {
+        id: VAULT_ROOT_ID.to_string(),
+        agent_id: VAULT_AGENT_ID.to_string(),
+        scope: "user".to_string(),
+        configured_path: configured_text,
+        canonical_path: Some(canonical_text),
+        enabled: true,
+        is_default: true,
+        last_warning: None,
+    };
+    db.upsert_discovery_root(&record, timestamp)?;
+    Ok(())
+}
+
 /// Register one target per catalog agent (idempotent; detection is refreshed).
 pub fn ensure_targets_registered(db: &Database, timestamp: i64) -> Result<(), AppError> {
     let home = home_dir();
@@ -156,6 +183,19 @@ pub fn ensure_targets_registered(db: &Database, timestamp: i64) -> Result<(), Ap
         };
         db.upsert_agent_target(&record, timestamp)?;
     }
+
+    let vault_target = AgentTargetRecord {
+        id: VAULT_AGENT_ID.to_string(),
+        name: "中央技能库".to_string(),
+        provider: "Skills Manager".to_string(),
+        detected: true,
+        installed: true,
+        executable_path: None,
+        last_warning: None,
+        last_scanned_at: None,
+    };
+    db.upsert_agent_target(&vault_target, timestamp)?;
+
     Ok(())
 }
 
@@ -267,6 +307,7 @@ pub fn scan_all(db: &Database, timestamp: i64) -> Result<ScanSnapshot, AppError>
     // so a fresh database would fail the foreign key otherwise.
     ensure_targets_registered(db, timestamp)?;
     let mut warnings = ensure_default_user_roots(db, timestamp)?;
+    ensure_vault_root(db, timestamp)?;
 
     let context = ScanContext {
         link_paths: db.link_paths()?,

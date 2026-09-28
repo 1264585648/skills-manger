@@ -29,7 +29,7 @@ fn same_file(left: &Path, right: &Path) -> bool {
     }
 }
 
-fn create_directory_link(source: &Path, link: &Path) -> Result<(), AppError> {
+pub(crate) fn create_directory_link(source: &Path, link: &Path) -> Result<(), AppError> {
     fs::create_dir_all(
         link.parent()
             .ok_or_else(|| AppError::State("链接目标缺少父目录".to_string()))?,
@@ -136,7 +136,7 @@ pub fn link_skill(
     })
 }
 
-fn upsert_link(
+pub(crate) fn upsert_link(
     db: &Database,
     skill_path: &str,
     root: &crate::db::DiscoveryRootRecord,

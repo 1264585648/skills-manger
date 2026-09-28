@@ -47,6 +47,14 @@ export const buildSkillEntries = (sources: EntrySources): SkillEntry[] => {
       const tagIds = tagIdsByPath.get(path) ?? [];
       const groupId = groupByPath.get(path) ?? null;
       const primary = refs[0];
+      const key = primary.name.trim().toLowerCase();
+      const sameNameInstances = instances.filter((i) => i.name.trim().toLowerCase() === key);
+      const nameConflict = (pathsByName.get(key)?.size ?? 0) > 1;
+      const uniqueHashes = new Set(sameNameInstances.map((i) => i.contentHash));
+      const canAutoMerge = nameConflict && uniqueHashes.size === 1;
+      const hasDivergentConflict = nameConflict && uniqueHashes.size > 1;
+      const inVault = refs.some((ref) => ref.agentId === "skills-manager-vault");
+
       return {
         path,
         name: primary.name,
@@ -61,7 +69,11 @@ export const buildSkillEntries = (sources: EntrySources): SkillEntry[] => {
         hasUserScope: refs.some((ref) => ref.scope === "user"),
         hasProjectScope: refs.some((ref) => ref.scope === "project"),
         missing: refs.every((ref) => ref.state === "missing"),
-        nameConflict: (pathsByName.get(primary.name.trim().toLowerCase())?.size ?? 0) > 1,
+        nameConflict,
+        canAutoMerge,
+        hasDivergentConflict,
+        conflictInstances: nameConflict ? sameNameInstances : [],
+        inVault,
         installedRootIds: links.filter((link) => link.skillPath === path).map((l) => l.targetRootId),
         note: notes.get(path) ?? "",
         groupId,
@@ -92,6 +104,10 @@ export interface SkillEntry {
   hasProjectScope: boolean;
   missing: boolean;
   nameConflict: boolean;
+  canAutoMerge: boolean;
+  hasDivergentConflict: boolean;
+  conflictInstances: SkillInstanceRecord[];
+  inVault: boolean;
   installedRootIds: string[];
   note: string;
   groupId: string | null;

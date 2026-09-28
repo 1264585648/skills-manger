@@ -420,6 +420,21 @@ impl Database {
         &self.path
     }
 
+    pub fn vault_dir(&self) -> PathBuf {
+        self.path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join("vault")
+    }
+
+    pub fn vault_skills_dir(&self) -> PathBuf {
+        self.vault_dir().join("skills")
+    }
+
+    pub fn vault_archive_dir(&self) -> PathBuf {
+        self.vault_dir().join(".archive")
+    }
+
     fn lock(&self) -> Result<MutexGuard<'_, Connection>, AppError> {
         self.connection.lock().map_err(|_| {
             AppError::State("database connection lock was poisoned by a previous panic".to_string())
@@ -864,6 +879,67 @@ impl Database {
             })
         })?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    pub fn transfer_governance_metadata(
+        &self,
+        from_path: &str,
+        to_path: &str,
+        timestamp: i64,
+    ) -> Result<(), AppError> {
+        if from_path == to_path {
+            return Ok(());
+        }
+        let connection = self.lock()?;
+
+        let note: Option<String> = connection
+            .query_row(
+                "SELECT note FROM skill_notes WHERE skill_path = ?1",
+                params![from_path],
+                |row| row.get(0),
+            )
+            .optional()?;
+
+        if let Some(note) = note {
+            connection.execute(
+                "INSERT INTO skill_notes (skill_path, note, updated_at)
+                 VALUES (?1, ?2, ?3)
+                 ON CONFLICT(skill_path) DO NOTHING",
+                params![to_path, note, timestamp],
+            )?;
+        }
+
+        let group_id: Option<String> = connection
+            .query_row(
+                "SELECT group_id FROM skill_groups WHERE skill_path = ?1",
+                params![from_path],
+                |row| row.get(0),
+            )
+            .optional()?;
+
+        if let Some(group_id) = group_id {
+            connection.execute(
+                "INSERT INTO skill_groups (skill_path, group_id, updated_at)
+                 VALUES (?1, ?2, ?3)
+                 ON CONFLICT(skill_path) DO NOTHING",
+                params![to_path, group_id, timestamp],
+            )?;
+        }
+
+        let mut statement =
+            connection.prepare("SELECT tag_id FROM skill_tags WHERE skill_path = ?1")?;
+        let tags = statement
+            .query_map(params![from_path], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        for tag_id in tags {
+            connection.execute(
+                "INSERT OR IGNORE INTO skill_tags (skill_path, tag_id) VALUES (?1, ?2)",
+                params![to_path, tag_id],
+            )?;
+        }
+
+        Ok(())
     }
 
     // ------------------------------------------------------ links (write-back)

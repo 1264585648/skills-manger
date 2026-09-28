@@ -6,6 +6,7 @@ mod error;
 mod linker;
 mod logging;
 mod skills;
+mod vault;
 
 use std::{
     fs,
@@ -162,6 +163,10 @@ pub fn run() {
             commands::link_skill,
             commands::unlink_skill,
             commands::list_links,
+            commands::incorporate_to_vault,
+            commands::auto_merge_identical,
+            commands::manual_merge_keep_one,
+            commands::fork_skill,
         ])
         .run(tauri::generate_context!())
         .expect("failed to run Skills Manager");

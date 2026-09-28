@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useDirectoryRegistry } from "./useDirectoryRegistry";
+import { useSkillVault } from "./useSkillVault";
 import { useWorkspaceData } from "./useWorkspaceData";
 import { suggestTagNames } from "../services/tagSuggestions";
 import { workspaceService } from "../services/workspaceService";
@@ -12,7 +13,7 @@ import {
 } from "../types/domain";
 import type { DiscoveryRootRecord } from "../types/discovery";
 
-/** 视图筛选是单选的；「仅项目」是与它正交的开关，两者可任意组合。 */
+/** 视图筛选是单选的；「仅项目」「分组筛选」是与它正交的开关，可任意组合。 */
 export type FilterKey = "all" | "attention" | "ungoverned" | "missing";
 
 /** 分发区的一行 = 一个 Agent（它的多个登记目录收敛成一行）。 */
@@ -21,13 +22,9 @@ export interface DistributionAgent {
   roots: DiscoveryRootRecord[];
   primary: DiscoveryRootRecord;
 }
-
 /**
- * 工作区的交互层：查询条件、选中、批量、以及全部写操作。
- *
- * 数据来自 useWorkspaceData（一次拉齐，选中切换不再触发请求）；这里只负责
- * 「用户想对哪些 Skill 做什么」。所有写操作都包在 withBusy 里，执行期间禁交互，
- * 避免连点产生重复连接。
+ * 工作区的交互层：查询条件、选中、批量、以及全部写操作。数据来自 useWorkspaceData
+ * （一次拉齐，选中切换不再触发请求）；所有写操作包在 withBusy 里，执行期间禁交互。
  */
 export function useWorkspace() {
   const data = useWorkspaceData();
@@ -41,6 +38,8 @@ export function useWorkspace() {
   const [query, setQuery] = useState("");
   const [filterKey, setFilterKey] = useState<FilterKey>("all");
   const [projectOnly, setProjectOnly] = useState(false);
+  /** 分组筛选："" 全部 / "__none__" 未分组 / 其余为 groupId；与视图筛选、仅项目正交。 */
+  const [groupFilter, setGroupFilter] = useState("");
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
   const [checked, setChecked] = useState<ReadonlySet<string>>(() => new Set<string>());
   const [showAllAgents, setShowAllAgents] = useState(false);
@@ -97,12 +96,23 @@ export function useWorkspace() {
       if (filterKey === "ungoverned" && isGoverned(entry)) return false;
       if (filterKey === "missing" && !entry.missing) return false;
       if (projectOnly && !entry.hasProjectScope) return false;
+      if (groupFilter === "__none__" && entry.groupId) return false;
+      if (groupFilter && groupFilter !== "__none__" && entry.groupId !== groupFilter) return false;
       if (!normalized) return true;
       return `${entry.name} ${entry.description} ${displayPath(entry.path)} ${entry.note} ${entry.groupName ?? ""} ${entry.tagNames.join(" ")}`
         .toLowerCase()
         .includes(normalized);
     });
-  }, [entries, query, filterKey, projectOnly]);
+  }, [entries, query, filterKey, projectOnly, groupFilter]);
+
+  // 分组被删/改名后，指向它的筛选条件自动复位，避免下拉框停在空值。
+  useEffect(() => {
+    const stale =
+      groupFilter !== "" &&
+      groupFilter !== "__none__" &&
+      !snapshot.groups.some((group) => group.id === groupFilter);
+    if (stale) setGroupFilter("");
+  }, [groupFilter, snapshot.groups]);
 
   const selected = useMemo(
     () => entries.find((entry) => entry.path === selectedPath) ?? null,
@@ -134,13 +144,14 @@ export function useWorkspace() {
    * 后者会把卸载后残留的空目录也算成已装，右侧于是多出几行噪音。
    */
   const distAgents = useMemo<DistributionAgent[]>(() => {
-    const visible = showAllAgents
+    const visible = (showAllAgents
       ? snapshot.targets
-      : snapshot.targets.filter((t) => t.installed);
+      : snapshot.targets.filter((t) => t.installed)
+    ).filter((t) => t.id !== "skills-manager-vault");
     const ids = new Set(visible.map((target) => target.id));
     const byAgent = new Map<string, DiscoveryRootRecord[]>();
     for (const root of snapshot.roots) {
-      if (!root.enabled || !ids.has(root.agentId)) continue;
+      if (!root.enabled || !ids.has(root.agentId) || root.agentId === "skills-manager-vault") continue;
       const list = byAgent.get(root.agentId);
       if (list) list.push(root);
       else byAgent.set(root.agentId, [root]);
@@ -183,11 +194,9 @@ export function useWorkspace() {
   // ------------------------------------------------------------------ 分发
 
   /**
-   * 一次 withBusy 内串行改多条连接，结束只 reload 一次。
-   *
-   * 「一键装到全部 Agent」如果逐个调用 toggleAgentLink，会并发发起 N 组请求、
-   * 触发 N 次全量 reload，而且 busy 只在每个子动作的间隙为 true —— 连点保护就
-   * 失效了。批量入口把整批变更当成一次原子操作。
+   * 一次 withBusy 内串行改多条连接，结束只 reload 一次：批量入口把整批变更当成
+   * 一次原子操作（逐个 toggle 会并发 N 组请求、触发 N 次 reload、busy 保护失效）。
+   * 完成后发全局反馈 —— 装/卸是最高频操作，静默成功会让人怀疑到底点没点上。
    */
   const setAgentLinks = useCallback(
     (entry: SkillEntry, changes: Array<{ rootId: string; linkIds: string[] }>): void =>
@@ -198,6 +207,15 @@ export function useWorkspace() {
           } else {
             await workspaceService.linkSkill(entry.path, change.rootId);
           }
+        }
+        const installs = changes.filter((change) => change.linkIds.length === 0).length;
+        const removals = changes.reduce((sum, change) => sum + change.linkIds.length, 0);
+        if (installs > 0 && removals > 0) {
+          setNotice(`「${entry.name}」已装到 ${installs} 个 Agent，并移除 ${removals} 条连接`);
+        } else if (installs > 0) {
+          setNotice(installs === 1 ? `「${entry.name}」已创建软连接` : `「${entry.name}」已装到 ${installs} 个 Agent`);
+        } else if (removals > 0) {
+          setNotice(removals === 1 ? `「${entry.name}」已移除连接` : `「${entry.name}」已移除 ${removals} 条连接`);
         }
         await reload();
       }),
@@ -291,6 +309,7 @@ export function useWorkspace() {
         await workspaceService.setSkillGroup(entry.path, batchGroupId || null);
       }
       setNotice(`已把 ${selectedEntries.length} 个 Skill 归入分组`);
+      setBatchGroupId("");
       await reload();
     });
   }, [batchGroupId, selectedEntries, withBusy, reload]);
@@ -305,6 +324,7 @@ export function useWorkspace() {
         created += 1;
       }
       setNotice(created ? `已写回 ${created} 个新连接` : "选中的 Skill 都已在该目录");
+      setBatchRootId("");
       await reload();
     });
   }, [batchRootId, selectedEntries, linkIdsFor, withBusy, reload]);
@@ -323,6 +343,7 @@ export function useWorkspace() {
   // ------------------------------------------------------------------ 目录登记
 
   const registry = useDirectoryRegistry({ catalog, withBusy, reload, setNotice, setError });
+  const vault = useSkillVault({ withBusy, reload, setNotice });
 
   return {
     ...data,
@@ -337,28 +358,14 @@ export function useWorkspace() {
     query,
     filterKey,
     projectOnly,
-    selectedPath,
-    checked,
-    showAllAgents,
-    noteDraft,
-    newGroupName,
-    newTagName,
-    batchTagId,
-    batchGroupId,
-    batchRootId,
-    searchRef,
-    setQuery,
-    setFilterKey,
-    setProjectOnly,
-    setSelectedPath,
-    setShowAllAgents,
-    setNoteDraft,
-    setNewGroupName,
-    setNewTagName,
-    setBatchTagId,
-    setBatchGroupId,
-    setBatchRootId,
+    groupFilter,
+    selectedPath, checked, showAllAgents, noteDraft, newGroupName, newTagName,
+    batchTagId, batchGroupId, batchRootId, searchRef,
+    setQuery, setFilterKey, setProjectOnly, setGroupFilter, setSelectedPath,
+    setShowAllAgents, setNoteDraft, setNewGroupName, setNewTagName,
+    setBatchTagId, setBatchGroupId, setBatchRootId,
     ...registry,
+    ...vault,
     linkIdsFor,
     setAgentLinks,
     toggleAgentLink,

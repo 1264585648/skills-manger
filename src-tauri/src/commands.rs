@@ -302,3 +302,92 @@ pub fn unlink_skill(
 pub fn list_links(state: State<'_, AppState>) -> Result<Vec<crate::db::LinkRecord>, CommandError> {
     state.db.list_links().map_err(CommandError::from)
 }
+
+// ------------------------------------------------------------------ 中央库与合并
+
+#[tauri::command]
+pub fn incorporate_to_vault(
+    state: State<'_, AppState>,
+    skill_path: String,
+) -> Result<String, CommandError> {
+    let canonical = crate::vault::incorporate_skill(
+        &state.db,
+        std::path::Path::new(&skill_path),
+        unix_timestamp()?,
+    )
+    .map_err(CommandError::from)?;
+
+    let _ = state.log.write(
+        "info",
+        "skill_incorporated_to_vault",
+        &format!("{skill_path} -> {}", canonical.display()),
+    );
+
+    Ok(canonical.to_string_lossy().into_owned())
+}
+
+#[tauri::command]
+pub fn auto_merge_identical(
+    state: State<'_, AppState>,
+) -> Result<crate::vault::AutoMergeReport, CommandError> {
+    let report = crate::vault::auto_merge_identical(&state.db, unix_timestamp()?)
+        .map_err(CommandError::from)?;
+
+    let _ = state.log.write(
+        "info",
+        "auto_merge_identical_completed",
+        &format!(
+            "merged {} skills; created {} links",
+            report.merged_names.len(),
+            report.links_created
+        ),
+    );
+
+    Ok(report)
+}
+
+#[tauri::command]
+pub fn manual_merge_keep_one(
+    state: State<'_, AppState>,
+    skill_name: String,
+    winner_path: String,
+) -> Result<String, CommandError> {
+    let canonical = crate::vault::manual_merge_keep_one(
+        &state.db,
+        &skill_name,
+        std::path::Path::new(&winner_path),
+        unix_timestamp()?,
+    )
+    .map_err(CommandError::from)?;
+
+    let _ = state.log.write(
+        "info",
+        "manual_merge_keep_one_completed",
+        &format!("{skill_name} retained from {winner_path}"),
+    );
+
+    Ok(canonical.to_string_lossy().into_owned())
+}
+
+#[tauri::command]
+pub fn fork_skill(
+    state: State<'_, AppState>,
+    source_path: String,
+    new_name: String,
+) -> Result<String, CommandError> {
+    let canonical = crate::vault::fork_skill(
+        &state.db,
+        std::path::Path::new(&source_path),
+        &new_name,
+        unix_timestamp()?,
+    )
+    .map_err(CommandError::from)?;
+
+    let _ = state.log.write(
+        "info",
+        "fork_skill_completed",
+        &format!("{source_path} forked to {new_name}"),
+    );
+
+    Ok(canonical.to_string_lossy().into_owned())
+}
