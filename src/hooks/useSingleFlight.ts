@@ -17,6 +17,10 @@ export function useSingleFlight<Args extends unknown[]>(
   run: (...args: Args) => Promise<void>,
 ): SingleFlightControls<Args> {
   const inFlight = useRef<Promise<void> | null>(null);
+  const pendingReload = useRef<{
+    promise: Promise<void>;
+    args: Args;
+  } | null>(null);
 
   const start = useCallback(
     (...args: Args) => {
@@ -37,8 +41,28 @@ export function useSingleFlight<Args extends unknown[]>(
 
   const reload = useCallback(
     async (...args: Args) => {
-      if (inFlight.current) await inFlight.current.catch(() => undefined);
-      await start(...args);
+      if (!inFlight.current) {
+        return start(...args);
+      }
+
+      if (pendingReload.current) {
+        pendingReload.current.args = args;
+        return pendingReload.current.promise;
+      }
+
+      const queued = (async () => {
+        try {
+          await inFlight.current;
+        } catch {
+          // ignore previous run errors
+        } finally {
+          pendingReload.current = null;
+        }
+        return start(...args);
+      })();
+
+      pendingReload.current = { promise: queued, args };
+      return queued;
     },
     [start],
   );

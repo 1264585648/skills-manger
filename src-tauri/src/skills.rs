@@ -259,14 +259,19 @@ fn fingerprint_tree(root: &Path) -> Result<TreeFingerprint, AppError> {
 
 /// Content hash of a whole skill: relative path plus file bytes, streamed so a
 /// large skill never lands in memory in one piece.
+///
+/// Uses explicit length-framing (u32 path length, path bytes, u64 content length, content bytes)
+/// to ensure different file trees can never produce identical hasher input.
 fn hash_files(files: &[FileEntry]) -> Result<String, AppError> {
     let mut hasher = Sha256::new();
     let mut buffer = [0_u8; 64 * 1024];
 
     for entry in files {
         let relative_text = entry.relative.to_string_lossy().replace('\\', "/");
-        hasher.update(relative_text.as_bytes());
-        hasher.update([0]);
+        let path_bytes = relative_text.as_bytes();
+        hasher.update((path_bytes.len() as u32).to_le_bytes());
+        hasher.update(path_bytes);
+        hasher.update(entry.len.to_le_bytes());
 
         let mut reader = BufReader::new(File::open(&entry.absolute)?);
         loop {
@@ -276,8 +281,6 @@ fn hash_files(files: &[FileEntry]) -> Result<String, AppError> {
             }
             hasher.update(&buffer[..read]);
         }
-
-        hasher.update([0]);
     }
 
     Ok(to_hex(&hasher.finalize()))
@@ -532,6 +535,37 @@ mod tests {
         assert!(error
             .to_string()
             .contains("SKILL.md must be a regular file and cannot be a symbolic link"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn hash_framing_ambiguity_is_prevented() {
+        let root = test_root("hash-framing");
+        let skill_a = root.join("skill-a");
+        let skill_b = root.join("skill-b");
+        fs::create_dir_all(&skill_a).expect("skill_a should exist");
+        fs::create_dir_all(&skill_b).expect("skill_b should exist");
+
+        let manifest_a = "---\nname: skill-a\ndescription: Ambiguity test A.\n---\n";
+        let manifest_b = "---\nname: skill-b\ndescription: Ambiguity test B.\n---\n";
+        fs::write(skill_a.join("SKILL.md"), manifest_a).expect("manifest A should write");
+        fs::write(skill_b.join("SKILL.md"), manifest_b).expect("manifest B should write");
+
+        // Construct the exact collision vector from the security review:
+        // Tree A: file "a" with bytes "X\0b\0Y"
+        // Tree B: file "a" with bytes "X", file "b" with bytes "Y"
+        fs::write(skill_a.join("a"), b"X\0b\0Y").expect("payload A should write");
+        fs::write(skill_b.join("a"), b"X").expect("payload Ba should write");
+        fs::write(skill_b.join("b"), b"Y").expect("payload Bb should write");
+
+        let inspected_a = inspect_skill(&skill_a, None).expect("inspection A should succeed");
+        let inspected_b = inspect_skill(&skill_b, None).expect("inspection B should succeed");
+
+        assert_ne!(
+            inspected_a.content_hash, inspected_b.content_hash,
+            "Length-framed hash must distinguish different file trees"
+        );
+
         let _ = fs::remove_dir_all(root);
     }
 }

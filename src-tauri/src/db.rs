@@ -289,21 +289,33 @@ fn migrate(connection: &Connection) -> Result<(), AppError> {
         return Ok(());
     }
 
-    match stored_schema_version(connection)?.as_deref() {
-        Some(SCHEMA_VERSION) => return Ok(()),
-        Some("2") => return upgrade_v2_to_v3(connection),
-        Some("3") => return upgrade_v3_to_v4(connection),
-        Some(_) => {}
-        None => {}
+    let version = stored_schema_version(connection)?;
+    match version.as_deref() {
+        Some(SCHEMA_VERSION) => Ok(()),
+        Some("2") => {
+            upgrade_v2_to_v3(connection)?;
+            upgrade_v3_to_v4(connection)?;
+            Ok(())
+        }
+        Some("3") => {
+            upgrade_v3_to_v4(connection)?;
+            Ok(())
+        }
+        Some("1") | None => {
+            // Foreign keys are re-enabled below; `connect` turns them on for every session.
+            connection.execute_batch("PRAGMA foreign_keys = OFF;")?;
+            for name in TABLE_NAMES.iter().chain(LEGACY_TABLE_NAMES) {
+                connection.execute(&format!("DROP TABLE IF EXISTS {name}"), [])?;
+            }
+            connection.execute_batch("PRAGMA foreign_keys = ON;")?;
+            Ok(())
+        }
+        Some(unknown) => {
+            Err(AppError::State(format!(
+                "不支持的数据库版本 '{unknown}'（当前程序支持版本为 {SCHEMA_VERSION}）。为保护数据安全，已拒绝打开该数据库，请升级应用。"
+            )))
+        }
     }
-
-    // Foreign keys are re-enabled below; `connect` turns them on for every session.
-    connection.execute_batch("PRAGMA foreign_keys = OFF;")?;
-    for name in TABLE_NAMES.iter().chain(LEGACY_TABLE_NAMES) {
-        connection.execute(&format!("DROP TABLE IF EXISTS {name}"), [])?;
-    }
-    connection.execute_batch("PRAGMA foreign_keys = ON;")?;
-    Ok(())
 }
 
 /// Add the rescan fingerprint column without touching existing rows.
@@ -316,9 +328,9 @@ fn upgrade_v2_to_v3(connection: &Connection) -> Result<(), AppError> {
         )?;
     }
     connection.execute(
-        "INSERT INTO schema_meta (key, value) VALUES ('schema_version', ?1)
+        "INSERT INTO schema_meta (key, value) VALUES ('schema_version', '3')
          ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-        params![SCHEMA_VERSION],
+        [],
     )?;
     Ok(())
 }
@@ -947,11 +959,12 @@ impl Database {
     pub fn list_links(&self) -> Result<Vec<LinkRecord>, AppError> {
         let connection = self.lock()?;
         let mut statement = connection.prepare(
-            "SELECT l.id, l.skill_path, si.name, l.target_root_id, r.agent_id, r.configured_path,
+            "SELECT l.id, l.skill_path,
+                    (SELECT si.name FROM skill_instances si WHERE si.path = l.skill_path LIMIT 1) AS skill_name,
+                    l.target_root_id, r.agent_id, r.configured_path,
                     l.link_path, l.created_at
              FROM links l
              JOIN discovery_roots r ON r.id = l.target_root_id
-             LEFT JOIN skill_instances si ON si.path = l.skill_path
              ORDER BY l.created_at DESC",
         )?;
         let rows = statement.query_map([], map_link_row)?;
@@ -962,11 +975,12 @@ impl Database {
         let connection = self.lock()?;
         let record = connection
             .query_row(
-                "SELECT l.id, l.skill_path, si.name, l.target_root_id, r.agent_id, r.configured_path,
+                "SELECT l.id, l.skill_path,
+                        (SELECT si.name FROM skill_instances si WHERE si.path = l.skill_path LIMIT 1) AS skill_name,
+                        l.target_root_id, r.agent_id, r.configured_path,
                         l.link_path, l.created_at
                  FROM links l
                  JOIN discovery_roots r ON r.id = l.target_root_id
-                 LEFT JOIN skill_instances si ON si.path = l.skill_path
                  WHERE l.id = ?1",
                 params![id],
                 map_link_row,
@@ -1450,6 +1464,159 @@ mod tests {
             .expect("instances should list")
             .is_empty());
         assert_eq!(db.link_count().expect("links should count"), 0);
+
+        drop(db);
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn version_two_upgrades_sequentially_through_v4_with_installed_column() {
+        let directory = test_root("v2-to-v4");
+        fs::create_dir_all(&directory).expect("test directory should exist");
+        let path = directory.join("skills.sqlite3");
+
+        {
+            let connection = rusqlite::Connection::open(&path).expect("file should open");
+            connection
+                .execute_batch(
+                    "
+                    CREATE TABLE schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+                    CREATE TABLE agent_targets (
+                        id TEXT PRIMARY KEY, name TEXT NOT NULL, provider TEXT NOT NULL,
+                        detected INTEGER NOT NULL DEFAULT 0, executable_path TEXT,
+                        last_warning TEXT, last_scanned_at INTEGER, updated_at INTEGER NOT NULL
+                    );
+                    CREATE TABLE discovery_roots (
+                        id TEXT PRIMARY KEY, agent_id TEXT NOT NULL, scope TEXT NOT NULL,
+                        configured_path TEXT NOT NULL, canonical_path TEXT,
+                        enabled INTEGER NOT NULL DEFAULT 1, is_default INTEGER NOT NULL DEFAULT 0,
+                        last_warning TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+                    );
+                    CREATE TABLE skill_instances (
+                        id TEXT PRIMARY KEY, agent_id TEXT NOT NULL, root_id TEXT NOT NULL,
+                        scope TEXT NOT NULL, path TEXT NOT NULL, name TEXT NOT NULL,
+                        description TEXT NOT NULL, content_hash TEXT NOT NULL,
+                        script_count INTEGER NOT NULL DEFAULT 0, state TEXT NOT NULL,
+                        first_discovered_at INTEGER NOT NULL, last_discovered_at INTEGER NOT NULL,
+                        updated_at INTEGER NOT NULL
+                    );
+                    INSERT INTO schema_meta VALUES ('schema_version', '2');
+                    ",
+                )
+                .expect("v2 fixture should create");
+        }
+
+        let db = Database::initialize(&path).expect("initialize should succeed");
+        let targets = db
+            .list_agent_targets()
+            .expect("list_agent_targets should succeed with installed column");
+        assert!(targets.is_empty());
+
+        let connection = db.lock().expect("lock should succeed");
+        assert_eq!(
+            stored_schema_version(&connection).expect("version should read"),
+            Some(SCHEMA_VERSION.to_string())
+        );
+        let agent_cols = column_names(&connection, "agent_targets").expect("columns should list");
+        assert!(agent_cols.contains(&"installed".to_string()));
+        let skill_cols = column_names(&connection, "skill_instances").expect("columns should list");
+        assert!(skill_cols.contains(&"content_signature".to_string()));
+
+        drop(connection);
+        drop(db);
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn future_database_version_is_rejected_without_dropping_tables() {
+        let directory = test_root("future-v5");
+        fs::create_dir_all(&directory).expect("test directory should exist");
+        let path = directory.join("skills.sqlite3");
+
+        {
+            let connection = rusqlite::Connection::open(&path).expect("file should open");
+            connection
+                .execute_batch(
+                    "
+                    CREATE TABLE schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+                    INSERT INTO schema_meta VALUES ('schema_version', '5');
+                    CREATE TABLE groups (id TEXT PRIMARY KEY, name TEXT NOT NULL);
+                    INSERT INTO groups VALUES ('important-group', 'Do not delete');
+                    ",
+                )
+                .expect("v5 fixture should create");
+        }
+
+        let result = Database::initialize(&path);
+        assert!(result.is_err(), "Opening future version must fail");
+
+        // Verify user data was NOT wiped
+        let connection = rusqlite::Connection::open(&path).expect("reopen should work");
+        let count: i64 = connection
+            .query_row("SELECT COUNT(*) FROM groups", [], |row| row.get(0))
+            .expect("groups table should still exist");
+        assert_eq!(
+            count, 1,
+            "User groups must not be wiped by unknown/future schema"
+        );
+
+        drop(connection);
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn list_links_does_not_multiply_rows_when_skill_has_multiple_instances() {
+        let directory = test_root("links-unique");
+        fs::create_dir_all(&directory).expect("test directory should exist");
+        let db = Database::initialize(directory.join("skills.sqlite3")).expect("db should open");
+        let now = unix_timestamp().expect("clock should be valid");
+
+        db.upsert_agent_target(&target(), now)
+            .expect("target should persist");
+        let mut cursor_target = target();
+        cursor_target.id = "cursor".to_string();
+        cursor_target.name = "Cursor".to_string();
+        db.upsert_agent_target(&cursor_target, now)
+            .expect("cursor target should persist");
+        let r1 = db
+            .upsert_discovery_root(&root("r-target"), now)
+            .expect("root should persist");
+
+        let connection = db.lock().expect("lock should succeed");
+        connection
+            .execute_batch(
+                "
+                INSERT INTO skill_instances
+                    (id, agent_id, root_id, scope, path, name, description, content_hash, state,
+                     first_discovered_at, last_discovered_at, updated_at)
+                VALUES
+                    ('si-1', 'claude-code', 'r-target', 'project', 'C:/shared/skill', 'skill', 'desc', 'h1', 'unmanaged', 1, 1, 1),
+                    ('si-2', 'cursor', 'r-target', 'project', 'C:/shared/skill', 'skill', 'desc', 'h1', 'unmanaged', 1, 1, 1);
+                ",
+            )
+            .expect("skill_instances should insert");
+        drop(connection);
+
+        db.insert_link(&LinkRecord {
+            id: "link-unique-1".to_string(),
+            skill_path: "C:/shared/skill".to_string(),
+            skill_name: "skill".to_string(),
+            target_root_id: r1.id.clone(),
+            target_agent_id: "claude-code".to_string(),
+            target_root_path: r1.configured_path.clone(),
+            link_path: "C:/target/skill".to_string(),
+            created_at: now,
+        })
+        .expect("link should insert");
+
+        let links = db.list_links().expect("links should list");
+        assert_eq!(
+            links.len(),
+            1,
+            "Expected exactly 1 link row, got {}",
+            links.len()
+        );
+        assert_eq!(links[0].id, "link-unique-1");
 
         drop(db);
         let _ = fs::remove_dir_all(directory);
