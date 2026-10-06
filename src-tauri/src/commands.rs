@@ -135,6 +135,7 @@ pub fn add_project_root(
         ),
     );
 
+    state.invalidate_scan_cache();
     Ok(record)
 }
 
@@ -151,6 +152,7 @@ pub fn remove_project_root(state: State<'_, AppState>, id: String) -> Result<(),
         &format!("discovery root registration removed: {id}"),
     );
 
+    state.invalidate_scan_cache();
     Ok(())
 }
 
@@ -266,8 +268,20 @@ pub fn link_skill(
     skill_path: String,
     target_root_id: String,
 ) -> Result<linker::LinkOutcome, CommandError> {
+    let _ = state.log.write(
+        "info",
+        "cmd_link_skill_called",
+        &format!("path={skill_path}, target={target_root_id}"),
+    );
     let outcome = linker::link_skill(&state.db, &skill_path, &target_root_id, unix_timestamp()?)
-        .map_err(CommandError::from)?;
+        .map_err(|err| {
+            let _ = state.log.write(
+                "error",
+                "link_skill_failed",
+                &format!("path={skill_path}, target={target_root_id}: {err}"),
+            );
+            CommandError::from(err)
+        })?;
 
     let _ = state.log.write(
         "info",
@@ -279,6 +293,7 @@ pub fn link_skill(
         &format!("{} -> {}", outcome.link.skill_path, outcome.link.link_path),
     );
 
+    state.invalidate_scan_cache();
     Ok(outcome)
 }
 
@@ -287,7 +302,20 @@ pub fn unlink_skill(
     state: State<'_, AppState>,
     link_id: String,
 ) -> Result<crate::db::LinkRecord, CommandError> {
-    let link = linker::unlink_skill(&state.db, &link_id).map_err(CommandError::from)?;
+    let _ = state.log.write(
+        "info",
+        "cmd_unlink_skill_called",
+        &format!("link_id={link_id}"),
+    );
+    let link = linker::unlink_skill(&state.db, &link_id)
+        .map_err(|err| {
+            let _ = state.log.write(
+                "error",
+                "unlink_skill_failed",
+                &format!("link_id={link_id}: {err}"),
+            );
+            CommandError::from(err)
+        })?;
 
     let _ = state.log.write(
         "info",
@@ -295,6 +323,7 @@ pub fn unlink_skill(
         &format!("link removed: {}", link.link_path),
     );
 
+    state.invalidate_scan_cache();
     Ok(link)
 }
 
@@ -310,12 +339,24 @@ pub fn incorporate_to_vault(
     state: State<'_, AppState>,
     skill_path: String,
 ) -> Result<String, CommandError> {
+    let _ = state.log.write(
+        "info",
+        "cmd_incorporate_to_vault_called",
+        &format!("path={skill_path}"),
+    );
     let canonical = crate::vault::incorporate_skill(
         &state.db,
         std::path::Path::new(&skill_path),
         unix_timestamp()?,
     )
-    .map_err(CommandError::from)?;
+    .map_err(|err| {
+        let _ = state.log.write(
+            "error",
+            "incorporate_failed",
+            &format!("path={skill_path}: {err}"),
+        );
+        CommandError::from(err)
+    })?;
 
     let _ = state.log.write(
         "info",
@@ -323,6 +364,41 @@ pub fn incorporate_to_vault(
         &format!("{skill_path} -> {}", canonical.display()),
     );
 
+    state.invalidate_scan_cache();
+    Ok(canonical.to_string_lossy().into_owned())
+}
+
+#[tauri::command]
+pub fn deactivate_home_skill(
+    state: State<'_, AppState>,
+    skill_path: String,
+) -> Result<String, CommandError> {
+    let _ = state.log.write(
+        "info",
+        "cmd_deactivate_home_skill_called",
+        &format!("path={skill_path}"),
+    );
+    let canonical = crate::vault::deactivate_home_skill(
+        &state.db,
+        std::path::Path::new(&skill_path),
+        unix_timestamp()?,
+    )
+    .map_err(|err| {
+        let _ = state.log.write(
+            "error",
+            "deactivate_failed",
+            &format!("path={skill_path}: {err}"),
+        );
+        CommandError::from(err)
+    })?;
+
+    let _ = state.log.write(
+        "info",
+        "home_skill_deactivated",
+        &format!("{skill_path} deactivated; preserved in {}", canonical.display()),
+    );
+
+    state.invalidate_scan_cache();
     Ok(canonical.to_string_lossy().into_owned())
 }
 
@@ -343,6 +419,7 @@ pub fn auto_merge_identical(
         ),
     );
 
+    state.invalidate_scan_cache();
     Ok(report)
 }
 
@@ -366,6 +443,7 @@ pub fn manual_merge_keep_one(
         &format!("{skill_name} retained from {winner_path}"),
     );
 
+    state.invalidate_scan_cache();
     Ok(canonical.to_string_lossy().into_owned())
 }
 
@@ -389,5 +467,6 @@ pub fn fork_skill(
         &format!("{source_path} forked to {new_name}"),
     );
 
+    state.invalidate_scan_cache();
     Ok(canonical.to_string_lossy().into_owned())
 }

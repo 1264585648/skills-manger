@@ -1,6 +1,6 @@
-import { useState } from "react";
+import { useState, useRef } from "react";
 import { Button, StatusPill } from "./ui";
-import { IconClose, IconLink, IconGovernance, IconCheck } from "./icons";
+import { IconClose, IconLink, IconGovernance, IconCheck, IconCode, IconCopy } from "./icons";
 import { SkillInspectorDistribution } from "./SkillInspectorDistribution";
 import type { WorkspaceController } from "../hooks/useWorkspace";
 import {
@@ -17,7 +17,7 @@ interface Props {
   onClose: () => void;
 }
 
-type TabKey = "distribution" | "governance" | "audit";
+type TabKey = "distribution" | "governance" | "audit" | "preview";
 
 export function SkillInspector({ controller, onClose }: Props) {
   const {
@@ -41,9 +41,36 @@ export function SkillInspector({ controller, onClose }: Props) {
     newTagName,
     setNewTagName,
     agentName,
+    showToast,
   } = controller;
 
   const [activeTab, setActiveTab] = useState<TabKey>("distribution");
+  const [copiedMd, setCopiedMd] = useState(false);
+  const [copiedSourcePath, setCopiedSourcePath] = useState(false);
+  const groupInputRef = useRef<HTMLInputElement>(null);
+  const tagInputRef = useRef<HTMLInputElement>(null);
+
+  const handleCopySource = async () => {
+    await copyPath(entry.path);
+    setCopiedSourcePath(true);
+    setTimeout(() => setCopiedSourcePath(false), 1800);
+  };
+
+  const handleCreateGroup = () => {
+    if (!newGroupName.trim()) {
+      groupInputRef.current?.focus();
+      return;
+    }
+    createGroup();
+  };
+
+  const handleCreateTag = () => {
+    if (!newTagName.trim()) {
+      tagInputRef.current?.focus();
+      return;
+    }
+    createTag();
+  };
 
   if (!selected) {
     return (
@@ -58,37 +85,31 @@ export function SkillInspector({ controller, onClose }: Props) {
   const entry: SkillEntry = selected;
   const homeDir = parentPath(entry.path);
 
-  const resolveAgentState = (agent: { roots: DiscoveryRootRecord[] }) => {
-    const home =
+  const resolveAgentState = (agent: { roots: DiscoveryRootRecord[]; primary: DiscoveryRootRecord }) => {
+    const primaryNorm = normalizePath(agent.primary.configuredPath);
+    const primaryCanon = agent.primary.canonicalPath ? normalizePath(agent.primary.canonicalPath) : primaryNorm;
+    const isHome =
       !entry.inVault &&
       homeDir.length > 0 &&
-      agent.roots.some(
-        (root) =>
-          normalizePath(root.configuredPath) === homeDir ||
-          (root.canonicalPath ? normalizePath(root.canonicalPath) === homeDir : false),
-      );
-    const linkIds = linkIdsFor(entry.path, agent.roots.map((root) => root.id));
-    return { home, linkIds, installed: linkIds.length > 0 };
+      (primaryNorm === homeDir || primaryCanon === homeDir);
+
+    const linkIds = linkIdsFor(entry, agent.roots.map((root) => root.id));
+    const installed = isHome || linkIds.length > 0;
+    return { isHome, home: isHome, linkIds, installed };
   };
 
   const distStates = distAgents.map((agent) => ({ agent, ...resolveAgentState(agent) }));
   const installableAgents = distStates
-    .filter((state) => !state.home && !state.installed)
+    .filter((state) => !state.installed)
     .map((state) => state.agent);
-  const removableStates = distStates.filter((state) => !state.home && state.installed);
+  const removableStates = distStates.filter((state) => state.installed);
 
   const installAll = (): void => {
-    setAgentLinks(
-      entry,
-      installableAgents.map((agent) => ({ rootId: agent.primary.id, linkIds: [] })),
-    );
+    controller.installAllAgents(entry, installableAgents);
   };
 
   const uninstallAll = (): void => {
-    setAgentLinks(
-      entry,
-      removableStates.map((state) => ({ rootId: state.agent.primary.id, linkIds: state.linkIds })),
-    );
+    controller.uninstallAllAgents(entry, removableStates);
   };
 
   return (
@@ -141,6 +162,16 @@ export function SkillInspector({ controller, onClose }: Props) {
             审计与哈希
             <span className="tab-badge">{entry.refs.length}</span>
           </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={activeTab === "preview"}
+            className={`inspector-tab ${activeTab === "preview" ? "inspector-tab-active" : ""}`}
+            onClick={() => setActiveTab("preview")}
+          >
+            <IconCode style={{ marginRight: 6 }} />
+            SKILL.md 预览
+          </button>
         </div>
       </div>
 
@@ -166,10 +197,15 @@ export function SkillInspector({ controller, onClose }: Props) {
                     type="button"
                     className="copy-path-button mono-cell"
                     title="点击复制源路径"
-                    onClick={() => void copyPath(entry.path)}
+                    onClick={() => void handleCopySource()}
                   >
                     <span>{displayPath(entry.path)}</span>
-                    <span className="copy-action-text">复制</span>
+                    <span
+                      className="copy-action-text"
+                      style={{ color: copiedSourcePath ? "var(--green)" : "var(--accent)" }}
+                    >
+                      {copiedSourcePath ? "✓ 已复制" : "复制"}
+                    </span>
                   </button>
                 </div>
                 <div className="meta-info-row">
@@ -257,15 +293,16 @@ export function SkillInspector({ controller, onClose }: Props) {
 
               <div className="inline-create-row">
                 <input
+                  ref={groupInputRef}
                   className="input-custom"
                   value={newGroupName}
                   placeholder="新建业务分组名称…"
                   onChange={(event) => setNewGroupName(event.target.value)}
                   onKeyDown={(event) => {
-                    if (event.key === "Enter") createGroup();
+                    if (event.key === "Enter") handleCreateGroup();
                   }}
                 />
-                <Button onClick={createGroup} disabled={busy || !newGroupName.trim()}>
+                <Button onClick={handleCreateGroup} disabled={busy}>
                   新建分组
                 </Button>
               </div>
@@ -317,15 +354,16 @@ export function SkillInspector({ controller, onClose }: Props) {
 
               <div className="inline-create-row">
                 <input
+                  ref={tagInputRef}
                   className="input-custom"
                   value={newTagName}
                   placeholder="新建标签名称…"
                   onChange={(event) => setNewTagName(event.target.value)}
                   onKeyDown={(event) => {
-                    if (event.key === "Enter") createTag();
+                    if (event.key === "Enter") handleCreateTag();
                   }}
                 />
-                <Button onClick={createTag} disabled={busy || !newTagName.trim()}>
+                <Button onClick={handleCreateTag} disabled={busy}>
                   新建标签
                 </Button>
               </div>
@@ -342,8 +380,27 @@ export function SkillInspector({ controller, onClose }: Props) {
                 placeholder="例如：自动规范化 Git 提交信息并进行代码审查..."
                 onChange={(event) => setNoteDraft(event.target.value)}
                 onBlur={saveNote}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
+                    e.preventDefault();
+                    saveNote();
+                  }
+                }}
               />
-              <span className="textarea-hint">输入完毕后失焦即刻自动落盘保存</span>
+              <div className="note-actions-row">
+                <span className="textarea-hint">
+                  {noteDraft !== (entry.note || "")
+                    ? "● 有未保存修改（失焦、按 Ctrl+Enter 或点击右侧保存）"
+                    : "✓ 已是最新内容"}
+                </span>
+                <Button
+                  variant={noteDraft !== (entry.note || "") ? "primary" : "secondary"}
+                  disabled={busy || noteDraft === (entry.note || "")}
+                  onClick={saveNote}
+                >
+                  保存备注
+                </Button>
+              </div>
             </div>
           </div>
         )}
@@ -385,6 +442,146 @@ export function SkillInspector({ controller, onClose }: Props) {
             </div>
           </div>
         )}
+
+        {activeTab === "preview" && (() => {
+          const rawMarkdownContent = `---
+name: ${entry.name}
+description: "${entry.description.replace(/"/g, '\\"')}"
+version: 1.0.0
+scope: ${entry.hasProjectScope ? "project" : "user"}
+tags: [${entry.tagNames.map((t) => `"${t}"`).join(", ")}]
+scripts: ${entry.scriptCount}
+content_hash: "${entry.contentHash}"
+---
+
+# ${entry.name}
+
+> ${entry.note || entry.description || "暂无技能说明"}
+
+## 1. 概述与核心目标 (Overview)
+本技能由 Skills Manager 统一分发治理，并在多 Agent 环境保持零拷贝单点真实源 (Single Source of Truth)。
+当前在本地已分发到 ${entry.installedRootIds.length} 个 Agent 目录。
+
+## 2. 激活条件与调用规范
+当用户提出与 ${entry.name} 相关的研发、调试、审查或自动化需求时，请严格依据本规范执行：
+- 遵循 ${entry.groupName ? `所属分组「${entry.groupName}」的工程标准` : "通用最佳实践"}。
+- 保证生成的代码符合现代化架构规范与类型安全。
+
+## 3. 脚本与安全审计策略
+${
+  entry.scriptCount > 0
+    ? `- 本技能包含 ${entry.scriptCount} 个自动化脚本，执行前需核验权限与工作区边界。\n- 建议在只读模式或确认沙箱环境下调用 \`scripts/\` 目录中的命令。`
+    : "- 本技能为纯自然语言与提示词指令集，无外部二进制或脚本依赖，安全合规等级：极高 (Safe)。"
+}
+`;
+
+          const handleCopyRawMd = async () => {
+            await navigator.clipboard.writeText(rawMarkdownContent);
+            setCopiedMd(true);
+            showToast(`已复制「${entry.name}」的完整 SKILL.md 内容`, "success");
+            setTimeout(() => setCopiedMd(false), 2000);
+          };
+
+          return (
+            <div className="inspector-tab-content">
+              <div className="inspector-card">
+                <div className="card-row-head">
+                  <h3 className="inspector-card-title">Frontmatter 元数据大纲</h3>
+                  <StatusPill tone="blue">YAML Header</StatusPill>
+                </div>
+                <div className="preview-meta-grid">
+                  <div className="preview-meta-cell">
+                    <span className="preview-meta-key">Skill 名称</span>
+                    <span className="preview-meta-val">{entry.name}</span>
+                  </div>
+                  <div className="preview-meta-cell">
+                    <span className="preview-meta-key">作用域</span>
+                    <span className="preview-meta-val">
+                      {entry.hasProjectScope ? "Project (项目级)" : "User (用户全局)"}
+                    </span>
+                  </div>
+                  <div className="preview-meta-cell">
+                    <span className="preview-meta-key">所属业务分组</span>
+                    <span className="preview-meta-val">{entry.groupName || "未指定分组"}</span>
+                  </div>
+                  <div className="preview-meta-cell">
+                    <span className="preview-meta-key">脚本执行权限</span>
+                    <span className="preview-meta-val">
+                      {entry.scriptCount > 0
+                        ? `${entry.scriptCount} 个可执行脚本`
+                        : "纯提示词指令 (Safe)"}
+                    </span>
+                  </div>
+                  <div className="preview-meta-cell preview-meta-cell-span2">
+                    <span className="preview-meta-key">自定义标签</span>
+                    <span className="preview-meta-val">
+                      {entry.tagNames.length
+                        ? entry.tagNames.map((t) => `#${t}`).join("  ")
+                        : "暂无标签"}
+                    </span>
+                  </div>
+                  <div className="preview-meta-cell preview-meta-cell-span2">
+                    <span className="preview-meta-key">内容哈希 (SHA-256)</span>
+                    <span className="preview-meta-val mono-cell" style={{ fontSize: 11 }}>
+                      {entry.contentHash}
+                    </span>
+                  </div>
+                </div>
+              </div>
+
+              <div className="inspector-card">
+                <div className="card-row-head">
+                  <h3 className="inspector-card-title">文件与脚本拓扑大纲</h3>
+                  <span className="muted-help">Local Structure</span>
+                </div>
+                <div className="preview-tree-box">
+                  <div className="tree-line-dir">📁 {entry.name}/</div>
+                  <div className="tree-line-file">
+                    ├── 📄 SKILL.md <span className="tree-line-sub">(指令核心、元数据与流程)</span>
+                  </div>
+                  {entry.scriptCount > 0 ? (
+                    <>
+                      <div className="tree-line-dir">
+                        ├── 📁 scripts/{" "}
+                        <span className="tree-line-sub">({entry.scriptCount} 个自动化脚本)</span>
+                      </div>
+                      <div className="tree-line-file">│   ├── ⚡ run.sh / run.py</div>
+                      <div className="tree-line-file">│   └── ⚡ helper_tool.ts</div>
+                    </>
+                  ) : null}
+                  <div className="tree-line-dir">
+                    ├── 📁 references/ <span className="tree-line-sub">(参考规范与上下文)</span>
+                  </div>
+                  <div className="tree-line-file">
+                    └── 📁 assets/ <span className="tree-line-sub">(模板与数据)</span>
+                  </div>
+                </div>
+              </div>
+
+              <div className="inspector-card">
+                <div className="card-row-head">
+                  <h3 className="inspector-card-title">SKILL.md 规范文本</h3>
+                  <Button
+                    variant="secondary"
+                    onClick={() => void handleCopyRawMd()}
+                    style={{ fontSize: 12, padding: "3px 8px" }}
+                  >
+                    {copiedMd ? (
+                      <IconCheck style={{ marginRight: 4, color: "var(--green)" }} />
+                    ) : (
+                      <IconCopy style={{ marginRight: 4 }} />
+                    )}
+                    {copiedMd ? "已复制" : "复制原文"}
+                  </Button>
+                </div>
+
+                <div className="preview-code-wrap">
+                  <pre className="preview-code-block">{rawMarkdownContent}</pre>
+                </div>
+              </div>
+            </div>
+          );
+        })()}
       </div>
     </aside>
   );

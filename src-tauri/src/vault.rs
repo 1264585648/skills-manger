@@ -88,7 +88,7 @@ pub fn incorporate_skill(
         .unwrap_or_else(|_| vault_skills_dir.clone());
 
     let inspected = skills::inspect_skill(source_path, None)?;
-    let skill_name = inspected.name;
+    let skill_name = inspected.name.clone();
     let target_in_vault = vault_skills_dir.join(&skill_name);
 
     if canonical_source.starts_with(&canonical_vault_dir) {
@@ -157,6 +157,60 @@ pub fn incorporate_skill(
         &canonical_vault_skill.to_string_lossy(),
         timestamp,
     );
+
+    // Explicitly register the new vault skill instance in database so it can be queried/linked immediately
+    let vault_instance_id = agent_discovery::stable_instance_id(
+        VAULT_AGENT_ID,
+        VAULT_ROOT_ID,
+        "user",
+        &canonical_vault_skill.to_string_lossy(),
+    );
+    let vault_draft = agent_discovery::SkillInstanceDraft {
+        id: vault_instance_id,
+        agent_id: VAULT_AGENT_ID.to_string(),
+        root_id: VAULT_ROOT_ID.to_string(),
+        scope: "user".to_string(),
+        path: canonical_vault_skill.to_string_lossy().into_owned(),
+        name: inspected.name,
+        description: inspected.description,
+        content_hash: inspected.content_hash,
+        content_signature: inspected.content_signature,
+        script_count: inspected.script_count,
+    };
+    db.upsert_skill_instance_draft(&vault_draft, timestamp)?;
+
+    Ok(canonical_vault_skill)
+}
+
+/// Deactivate a home skill: incorporates it into Central Vault to safely preserve files,
+/// but immediately removes the junction from the origin directory and deletes the link record.
+pub fn deactivate_home_skill(
+    db: &Database,
+    source_path: &Path,
+    timestamp: i64,
+) -> Result<PathBuf, AppError> {
+    let canonical_vault_skill = incorporate_skill(db, source_path, timestamp)?;
+
+    // If source_path was replaced with a junction, remove the junction
+    if let Ok(metadata) = fs::symlink_metadata(source_path) {
+        if metadata.file_type().is_symlink() {
+            skills::remove_if_exists(source_path)?;
+        }
+    }
+
+    // Remove any link records pointing to source_path
+    let source_str = source_path.to_string_lossy();
+    let norm_source = source_str.replace('/', "\\");
+    let links = db.list_links()?;
+    for link in links {
+        let norm_link = link.link_path.replace('/', "\\");
+        if norm_link.eq_ignore_ascii_case(&norm_source) {
+            let _ = db.delete_link(&link.id);
+        }
+    }
+
+    // Delete the old instance record for source_path from skill_instances
+    let _ = db.delete_skill_instance_by_path(&source_str);
 
     Ok(canonical_vault_skill)
 }
@@ -663,4 +717,46 @@ mod tests {
         drop(database);
         let _ = fs::remove_dir_all(directory);
     }
+
+    #[test]
+    fn deactivate_home_skill_preserves_in_vault_and_cleans_origin() {
+        let directory = test_root("deactivate-home");
+        fs::create_dir_all(&directory).expect("dir should exist");
+        let database =
+            Database::initialize(directory.join("skills.sqlite3")).expect("db should open");
+        let now = unix_timestamp().expect("clock should be valid");
+
+        agent_discovery::ensure_targets_registered(&database, now).expect("targets");
+        agent_discovery::ensure_vault_root(&database, now).expect("vault root");
+
+        let agent_root = directory.join(".claude").join("skills");
+        fs::create_dir_all(&agent_root).expect("root");
+        let _root_record = agent_discovery::register_project_root(&database, "claude-code", &agent_root, now)
+            .expect("register root");
+
+        let skill_dir = agent_root.join("test-deactivate");
+        write_skill(&skill_dir, "test-deactivate", "original skill content");
+
+        agent_discovery::scan_all(&database, now).expect("scan");
+
+        let canonical_vault = deactivate_home_skill(&database, &skill_dir, now + 1)
+            .expect("deactivate should succeed");
+
+        // Master files must exist in vault
+        assert!(canonical_vault.join("SKILL.md").is_file());
+        let content = fs::read_to_string(canonical_vault.join("SKILL.md")).unwrap();
+        assert!(content.contains("original skill content"));
+
+        // Origin directory must be completely removed
+        assert!(!skill_dir.exists(), "Origin dir must not exist after deactivate");
+
+        // No active links pointing to origin dir
+        let links = database.list_links().expect("list links");
+        assert!(links.is_empty(), "Links must be deleted");
+
+        drop(database);
+        let _ = fs::remove_dir_all(directory);
+    }
 }
+
+

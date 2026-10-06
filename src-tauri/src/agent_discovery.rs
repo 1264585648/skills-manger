@@ -124,7 +124,7 @@ fn stable_root_id(agent_id: &str, scope: &str, path: &str) -> String {
     skills::hash_text(&format!("{agent_id}\0{scope}\0{path}"))
 }
 
-fn stable_instance_id(agent_id: &str, root_id: &str, scope: &str, canonical_path: &str) -> String {
+pub(crate) fn stable_instance_id(agent_id: &str, root_id: &str, scope: &str, canonical_path: &str) -> String {
     skills::hash_text(&format!("{agent_id}\0{root_id}\0{scope}\0{canonical_path}"))
 }
 
@@ -224,7 +224,7 @@ pub fn ensure_default_user_roots(db: &Database, timestamp: i64) -> Result<Vec<St
                 id: stable_root_id(agent.id, "user", &canonical_text),
                 agent_id: agent.id.to_string(),
                 scope: "user".to_string(),
-                configured_path: configured.to_string_lossy().into_owned(),
+                configured_path: configured.to_string_lossy().replace('/', "\\"),
                 canonical_path: Some(canonical_text),
                 enabled: true,
                 is_default: true,

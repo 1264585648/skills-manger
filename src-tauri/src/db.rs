@@ -598,7 +598,37 @@ impl Database {
                 map_skill_instance,
             )
             .optional()?;
-        Ok(record)
+        if record.is_some() {
+            return Ok(record);
+        }
+
+        // Normalization fallback for Windows verbatim prefix \\?\ and forward/backward slashes
+        let norm = path.replace('/', "\\");
+        let stripped = norm.strip_prefix(r"\\?\").unwrap_or(&norm);
+        let with_verbatim = format!(r"\\?\{}", stripped);
+
+        let fallback = connection
+            .query_row(
+                "SELECT id, agent_id, root_id, scope, path, name, description, content_hash,
+                        script_count, state, first_discovered_at, last_discovered_at
+                 FROM skill_instances WHERE path = ?1 OR path = ?2 OR path = ?3",
+                params![stripped, with_verbatim, norm],
+                map_skill_instance,
+            )
+            .optional()?;
+        Ok(fallback)
+    }
+
+    pub fn delete_skill_instance_by_path(&self, path: &str) -> Result<(), AppError> {
+        let connection = self.lock()?;
+        let norm = path.replace('/', "\\");
+        let stripped = norm.strip_prefix(r"\\?\").unwrap_or(&norm);
+        let with_verbatim = format!(r"\\?\{}", stripped);
+        connection.execute(
+            "DELETE FROM skill_instances WHERE path = ?1 OR path = ?2 OR path = ?3 OR path = ?4",
+            params![path, stripped, with_verbatim, norm],
+        )?;
+        Ok(())
     }
 
     /// `path -> (content_hash, content_signature)` for every cached instance.
@@ -683,6 +713,45 @@ impl Database {
         }
 
         transaction.commit()?;
+        Ok(())
+    }
+
+    pub fn upsert_skill_instance_draft(
+        &self,
+        draft: &SkillInstanceDraft,
+        timestamp: i64,
+    ) -> Result<(), AppError> {
+        let connection = self.lock()?;
+        connection.execute(
+            "INSERT INTO skill_instances
+                (id, agent_id, root_id, scope, path, name, description, content_hash,
+                 content_signature, script_count, state, first_discovered_at,
+                 last_discovered_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'unmanaged', ?11, ?11, ?11)
+             ON CONFLICT(id) DO UPDATE SET
+                path = excluded.path,
+                name = excluded.name,
+                description = excluded.description,
+                content_hash = excluded.content_hash,
+                content_signature = excluded.content_signature,
+                script_count = excluded.script_count,
+                state = 'unmanaged',
+                last_discovered_at = excluded.last_discovered_at,
+                updated_at = excluded.updated_at",
+            params![
+                draft.id,
+                draft.agent_id,
+                draft.root_id,
+                draft.scope,
+                draft.path,
+                draft.name,
+                draft.description,
+                draft.content_hash,
+                draft.content_signature,
+                draft.script_count,
+                timestamp,
+            ],
+        )?;
         Ok(())
     }
 

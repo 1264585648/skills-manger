@@ -1,5 +1,7 @@
+import { useState } from "react";
 import { StatusPill } from "./ui";
-import { IconSkill } from "./icons";
+import { IconSkill, IconCopy, IconCheck } from "./icons";
+import { HighlightText } from "./HighlightText";
 import type { SkillEntry } from "../types/domain";
 import type { WorkspaceController } from "../hooks/useWorkspace";
 
@@ -8,7 +10,7 @@ interface Props {
   isSelected: boolean;
   isChecked: boolean;
   onSelect: () => void;
-  onToggleCheck: () => void;
+  onToggleCheck: (shiftKey?: boolean) => void;
   controller: WorkspaceController;
 }
 
@@ -20,7 +22,8 @@ export function SkillCard({
   onToggleCheck,
   controller,
 }: Props) {
-  const { agentName, snapshot } = controller;
+  const { agentName, snapshot, query, showToast } = controller;
+  const [copiedPath, setCopiedPath] = useState(false);
 
   // Determine which agents this skill is deployed in (both primary home & created junctions)
   const deployedAgentNames = new Set<string>();
@@ -49,6 +52,14 @@ export function SkillCard({
         ? "项目"
         : "全局用户";
 
+  const handleCopyPath = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    void navigator.clipboard.writeText(entry.path);
+    setCopiedPath(true);
+    showToast(`已复制「${entry.name}」本地路径`, "success");
+    setTimeout(() => setCopiedPath(false), 1800);
+  };
+
   return (
     <div
       className={`skill-card ${isSelected ? "skill-card-selected" : ""} ${
@@ -73,14 +84,17 @@ export function SkillCard({
             checked={isChecked}
             aria-label={`选择 ${entry.name}`}
             onClick={(e) => e.stopPropagation()}
-            onChange={onToggleCheck}
+            onChange={(e) => {
+              const native = e.nativeEvent as MouseEvent;
+              onToggleCheck(native.shiftKey);
+            }}
           />
           <div className="card-icon-box">
             <IconSkill />
           </div>
           <div className="card-title-group">
             <h3 className="card-title" title={entry.name}>
-              {entry.name}
+              <HighlightText text={entry.name} query={query} />
             </h3>
             <span className="card-scope-badge">{scopeLabel}</span>
           </div>
@@ -94,9 +108,9 @@ export function SkillCard({
           ) : entry.canAutoMerge ? (
             <StatusPill tone="amber">待合并</StatusPill>
           ) : entry.scriptCount > 0 ? (
-            <StatusPill tone="amber">含脚本</StatusPill>
+            <StatusPill tone="amber">含脚本 ({entry.scriptCount})</StatusPill>
           ) : (
-            <StatusPill tone="gray">{entry.inVault ? "中央库" : "就绪"}</StatusPill>
+            <StatusPill tone="gray">就绪</StatusPill>
           )}
         </div>
       </div>
@@ -104,9 +118,11 @@ export function SkillCard({
       <div className="card-body">
         <p className="card-description" title={entry.note || entry.description || "暂无描述"}>
           {entry.note ? (
-            <span className="card-note-highlight">{entry.note}</span>
+            <span className="card-note-highlight">
+              <HighlightText text={entry.note} query={query} />
+            </span>
           ) : (
-            entry.description || "暂无描述"
+            <HighlightText text={entry.description || "暂无描述"} query={query} />
           )}
         </p>
       </div>
@@ -127,6 +143,19 @@ export function SkillCard({
         {entry.tagNames.length > 3 ? (
           <span className="card-tag-more">+{entry.tagNames.length - 3}</span>
         ) : null}
+
+        <button
+          type="button"
+          className="card-quick-copy-btn"
+          title="复制本地路径"
+          onClick={handleCopyPath}
+        >
+          {copiedPath ? (
+            <IconCheck style={{ color: "var(--green)" }} />
+          ) : (
+            <IconCopy style={{ opacity: 0.7 }} />
+          )}
+        </button>
       </div>
 
       <div className="card-footer">
@@ -144,9 +173,7 @@ export function SkillCard({
               </span>
             ) : null}
             {deployedList.length === 0 ? (
-              <span className="deployed-none">
-                {entry.inVault ? "在库中 (未分发)" : "未分发"}
-              </span>
+              <span className="deployed-none">未分发</span>
             ) : null}
           </div>
         </div>

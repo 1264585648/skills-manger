@@ -26,11 +26,18 @@ export function Button({
 export function StatusPill({
   children,
   tone = "gray",
+  dot = true,
 }: {
   children: ReactNode;
   tone?: Tone;
+  dot?: boolean;
 }) {
-  return <span className={`status-pill status-${tone}`}>{children}</span>;
+  return (
+    <span className={`status-pill status-${tone}`}>
+      {dot ? <span className={`status-pill-dot status-pill-dot-${tone}`} aria-hidden="true" /> : null}
+      <span>{children}</span>
+    </span>
+  );
 }
 
 export function Switch({
@@ -55,7 +62,10 @@ export function Switch({
       title={title}
       disabled={disabled}
       className={`toggle-switch ${checked ? "toggle-switch-on" : ""}`}
-      onClick={() => onChange?.(!checked)}
+      onClick={(e) => {
+        e.stopPropagation();
+        onChange?.(!checked);
+      }}
     >
       <span className="toggle-switch-thumb" />
     </button>

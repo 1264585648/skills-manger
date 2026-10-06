@@ -4,7 +4,7 @@ import type { SkillEntry } from "../types/domain";
 
 interface Props {
   withBusy: (action: () => Promise<void>) => Promise<void>;
-  reload: () => Promise<void>;
+  reload: (force?: boolean) => Promise<void>;
   setNotice: (msg: string | null) => void;
 }
 
@@ -16,7 +16,7 @@ export function useSkillVault({ withBusy, reload, setNotice }: Props) {
       withBusy(async () => {
         await workspaceService.incorporateToVault(entry.path);
         setNotice(`「${entry.name}」已成功纳管入中央库`);
-        await reload();
+        await reload(true);
       }),
     [withBusy, reload, setNotice],
   );
@@ -30,7 +30,7 @@ export function useSkillVault({ withBusy, reload, setNotice }: Props) {
         } else {
           setNotice("未检测到可自动合并的完全一致副本");
         }
-        await reload();
+        await reload(true);
       }),
     [withBusy, reload, setNotice],
   );
@@ -41,7 +41,7 @@ export function useSkillVault({ withBusy, reload, setNotice }: Props) {
         await workspaceService.manualMergeKeepOne(skillName, winnerPath);
         setNotice(`已保留选定版本作为「${skillName}」的唯一标准库`);
         setConflictEntry(null);
-        await reload();
+        await reload(true);
       }),
     [withBusy, reload, setNotice],
   );
@@ -52,7 +52,7 @@ export function useSkillVault({ withBusy, reload, setNotice }: Props) {
         await workspaceService.forkSkill(sourcePath, newName);
         setNotice(`已成功分叉创建新技能「${newName}」入中央库`);
         setConflictEntry(null);
-        await reload();
+        await reload(true);
       }),
     [withBusy, reload, setNotice],
   );

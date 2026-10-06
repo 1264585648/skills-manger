@@ -5,6 +5,7 @@ import {
   IconFolder,
   IconGovernance,
   IconRefresh,
+  IconKeyboard,
 } from "./icons";
 import type { WorkspaceController } from "../hooks/useWorkspace";
 
@@ -27,7 +28,7 @@ export function AppNavRail({
     catalog,
     loading,
     busy,
-    reload,
+    refreshScan,
   } = controller;
 
   const installedAgentsCount = snapshot.targets.filter((t) => t.installed).length;
@@ -112,6 +113,17 @@ export function AppNavRail({
           <span className="nav-item-label">登记目录</span>
           <span className="nav-item-badge">{snapshot.roots.length}</span>
         </button>
+
+        <button
+          type="button"
+          className="nav-item"
+          onClick={() => controller.setShortcutsModalOpen(true)}
+          title="全键盘导航与快捷键指南 (?)"
+        >
+          <IconKeyboard className="nav-item-icon" />
+          <span className="nav-item-label">快捷键</span>
+          <kbd className="nav-item-badge" style={{ fontSize: 10, padding: "1px 5px" }}>?</kbd>
+        </button>
       </nav>
 
       <div className="nav-footer">
@@ -128,7 +140,7 @@ export function AppNavRail({
           type="button"
           className="nav-refresh-button"
           disabled={busy || loading}
-          onClick={() => void reload(true)}
+          onClick={() => void refreshScan()}
           title="只读扫描所有已登记目录"
         >
           <IconRefresh className={`nav-refresh-icon ${loading ? "icon-spin" : ""}`} />

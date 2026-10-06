@@ -69,6 +69,13 @@ impl AppState {
         }
         Ok(snapshot)
     }
+
+    /// Invalidate the scan cache after disk or database mutations.
+    pub fn invalidate_scan_cache(&self) {
+        if let Ok(mut guard) = self.scan_cache.lock() {
+            *guard = None;
+        }
+    }
 }
 
 pub fn run() {
@@ -164,6 +171,7 @@ pub fn run() {
             commands::unlink_skill,
             commands::list_links,
             commands::incorporate_to_vault,
+            commands::deactivate_home_skill,
             commands::auto_merge_identical,
             commands::manual_merge_keep_one,
             commands::fork_skill,

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useWorkspace } from "../hooks/useWorkspace";
 import { AppNavRail } from "../components/AppNavRail";
 import { SkillCatalog } from "../components/SkillCatalog";
@@ -6,6 +6,8 @@ import { SkillInspector } from "../components/SkillInspector";
 import { AgentMatrixModal } from "../components/AgentMatrixModal";
 import { DirectoryModal } from "../components/DirectoryModal";
 import { SkillConflictModal } from "../components/SkillConflictModal";
+import { KeyboardShortcutsModal } from "../components/KeyboardShortcutsModal";
+import { ToastContainer } from "../components/Toast";
 import { ErrorNotice } from "../components/ui";
 
 /**
@@ -25,8 +27,29 @@ export function WorkspacePage() {
     setInspectorOpen(true);
   };
 
+  // 键盘 Enter 快捷键快速切换 Inspector 面板展开/收起
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement | null;
+      const tag = target?.tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
+
+      if (e.key === "Enter" && controller.selected) {
+        e.preventDefault();
+        setInspectorOpen((prev) => !prev);
+      }
+    };
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [controller.selected]);
+
   return (
-    <div className={`workspace-layout ${inspectorOpen && controller.selected ? "inspector-expanded" : "inspector-collapsed"}`}>
+    <div
+      className={`workspace-layout ${
+        inspectorOpen && controller.selected ? "inspector-expanded" : "inspector-collapsed"
+      }`}
+    >
       {/* 顶部全局错误通知 */}
       {controller.error ? (
         <div className="workspace-error-banner">
@@ -62,13 +85,11 @@ export function WorkspacePage() {
         />
       ) : null}
 
-      {/* 全局浮动操作反馈 Toast */}
-      {controller.notice ? (
-        <div className="toast" role="status" key={controller.notice}>
-          <span className="toast-dot" />
-          <span>{controller.notice}</span>
-        </div>
-      ) : null}
+      {/* 全局多态 Toast 浮动通知系统 */}
+      <ToastContainer
+        toasts={controller.toasts}
+        onDismiss={controller.removeToast}
+      />
 
       {/* 弹窗：Agent 矩阵状态探测 */}
       <AgentMatrixModal
@@ -92,6 +113,12 @@ export function WorkspacePage() {
         onFork={controller.forkSkill}
         agentName={controller.agentName}
         busy={controller.busy}
+      />
+
+      {/* 弹窗：全键盘导航与快捷键指南 */}
+      <KeyboardShortcutsModal
+        open={controller.shortcutsModalOpen}
+        onClose={() => controller.setShortcutsModalOpen(false)}
       />
     </div>
   );

@@ -53,31 +53,56 @@ pub(crate) fn create_directory_link(source: &Path, link: &Path) -> Result<(), Ap
 }
 
 #[cfg(windows)]
-fn create_junction(source: &Path, link: &Path) -> Result<(), AppError> {
-    use std::{path::PathBuf, process::Command};
+pub(crate) fn normalize_for_windows_cmd(path: &Path) -> String {
+    let s = path.to_string_lossy();
+    let stripped = s
+        .strip_prefix(r"\\?\UNC\")
+        .map(|p| format!(r"\\{}", p))
+        .or_else(|| s.strip_prefix(r"\\?\").map(|p| p.to_string()))
+        .unwrap_or_else(|| s.into_owned());
+    stripped.replace('/', "\\")
+}
 
-    // Junction targets must not use the \\?\ verbatim prefix.
-    let target = source
-        .to_string_lossy()
-        .strip_prefix(r"\\?\")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| source.to_path_buf());
+#[cfg(windows)]
+fn create_junction(source: &Path, link: &Path) -> Result<(), AppError> {
+    use std::process::Command;
+
+    let link_str = normalize_for_windows_cmd(link);
+    let target_str = normalize_for_windows_cmd(source);
+
+    // If link already exists as a symlink/junction or broken symlink, clean it up first
+    if let Ok(meta) = fs::symlink_metadata(link) {
+        if meta.file_type().is_symlink() || !link.exists() {
+            let _ = skills::remove_if_exists(link);
+        }
+    }
 
     let output = Command::new("cmd")
         .args([
             "/C",
             "mklink",
             "/J",
-            &link.to_string_lossy(),
-            &target.to_string_lossy(),
+            &link_str,
+            &target_str,
         ])
         .output()?;
+
     if output.status.success() && link.exists() {
         Ok(())
     } else {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let detail = if !stderr.trim().is_empty() {
+            stderr.trim()
+        } else if !stdout.trim().is_empty() {
+            stdout.trim()
+        } else {
+            "无法创建目录联接（junction）；请检查权限或路径"
+        };
         Err(AppError::State(format!(
-            "无法为 {} 创建目录联接（junction）；请以管理员身份运行或开启 Windows 开发者模式",
-            link.display()
+            "无法为 {} 创建目录联接: {}",
+            link.display(),
+            detail
         )))
     }
 }
@@ -89,9 +114,31 @@ pub fn link_skill(
     target_root_id: &str,
     timestamp: i64,
 ) -> Result<LinkOutcome, AppError> {
-    let instance = db
-        .skill_instance_by_path(skill_path)?
-        .ok_or_else(|| AppError::State("只能写入已在发现列表中存在的 Skill".to_string()))?;
+    let instance = match db.skill_instance_by_path(skill_path)? {
+        Some(inst) => inst,
+        None => {
+            let source_path = Path::new(skill_path);
+            if source_path.is_dir() && source_path.join("SKILL.md").is_file() {
+                let inspected = skills::inspect_skill(source_path, None)?;
+                crate::agent_discovery::SkillInstanceRecord {
+                    id: skills::hash_text(&format!("direct\0{}", source_path.to_string_lossy())),
+                    agent_id: "unknown".to_string(),
+                    root_id: "unknown".to_string(),
+                    scope: "user".to_string(),
+                    path: source_path.to_string_lossy().into_owned(),
+                    name: inspected.name,
+                    description: inspected.description,
+                    content_hash: inspected.content_hash,
+                    script_count: inspected.script_count,
+                    state: "unmanaged".to_string(),
+                    first_discovered_at: timestamp,
+                    last_discovered_at: timestamp,
+                }
+            } else {
+                return Err(AppError::State("只能写入已在发现列表中存在的 Skill".to_string()));
+            }
+        }
+    };
     let root = db
         .discovery_root(target_root_id)?
         .ok_or_else(|| AppError::State("目标 Agent 目录不存在".to_string()))?;
@@ -119,13 +166,19 @@ pub fn link_skill(
                     created: false,
                 });
             }
+            // If the existing symlink is broken, clean it up and recreate
+            if link_path.canonicalize().is_err() {
+                let _ = skills::remove_if_exists(&link_path);
+            } else {
+                return Err(AppError::State(
+                    "目标位置已被其他软连接占用，请先移除该连接".to_string(),
+                ));
+            }
+        } else {
             return Err(AppError::State(
-                "目标位置已被其他软连接占用，请先移除该连接".to_string(),
+                "目标位置已存在真实文件/目录，不会覆盖".to_string(),
             ));
         }
-        return Err(AppError::State(
-            "目标位置已存在真实文件/目录，不会覆盖".to_string(),
-        ));
     }
 
     create_directory_link(source, &link_path)?;
@@ -144,6 +197,7 @@ pub(crate) fn upsert_link(
     timestamp: i64,
 ) -> Result<LinkRecord, AppError> {
     let id = skills::hash_text(&format!("link\0{}\0{}", root.id, skill_path));
+    let normalized_link_path = link_path.to_string_lossy().replace('/', "\\");
     let link = LinkRecord {
         id: id.clone(),
         skill_path: skill_path.to_string(),
@@ -151,7 +205,7 @@ pub(crate) fn upsert_link(
         target_root_id: root.id.clone(),
         target_agent_id: root.agent_id.clone(),
         target_root_path: root.configured_path.clone(),
-        link_path: link_path.to_string_lossy().into_owned(),
+        link_path: normalized_link_path,
         created_at: timestamp,
     };
     db.insert_link(&link)?;

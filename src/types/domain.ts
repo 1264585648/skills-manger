@@ -74,7 +74,15 @@ export const buildSkillEntries = (sources: EntrySources): SkillEntry[] => {
         hasDivergentConflict,
         conflictInstances: nameConflict ? sameNameInstances : [],
         inVault,
-        installedRootIds: links.filter((link) => link.skillPath === path).map((l) => l.targetRootId),
+        installedRootIds: links
+          .filter((link) => {
+            const linkNorm = normalizePath(link.skillPath);
+            const pathNorm = normalizePath(path);
+            if (linkNorm === pathNorm) return true;
+            if (link.skillName && link.skillName.trim().toLowerCase() === key) return true;
+            return false;
+          })
+          .map((l) => l.targetRootId),
         note: notes.get(path) ?? "",
         groupId,
         groupName: groupId ? groupNames.get(groupId) ?? null : null,

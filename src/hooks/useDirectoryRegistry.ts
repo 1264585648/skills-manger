@@ -32,22 +32,35 @@ export function useDirectoryRegistry({
   const [pickedPath, setPickedPath] = useState<string | null>(null);
   const [pickedAgentId, setPickedAgentId] = useState("claude-code");
 
+  const onPathChange = useCallback(
+    (value: string) => {
+      setPickedPath(value);
+      const trimmed = value.trim();
+      if (trimmed) {
+        const matched = catalog.find((agent) => matchesConvention(trimmed, agent.projectRoots));
+        if (matched) setPickedAgentId(matched.id);
+      }
+    },
+    [catalog],
+  );
+
   const pickDirectory = useCallback(async (): Promise<void> => {
     await withBusy(async () => {
       const path = await workspaceService.pickSkillsDirectory();
       if (!path) return;
-      setPickedPath(path);
-      // 目录名符合某个 Agent 的项目约定时自动选上，省一次手动切换。
-      const matched = catalog.find((agent) => matchesConvention(path, agent.projectRoots));
-      if (matched) setPickedAgentId(matched.id);
+      onPathChange(path);
     });
-  }, [catalog, withBusy]);
+  }, [onPathChange, withBusy]);
 
   const addRoot = useCallback((): void => {
-    if (!pickedPath) return;
+    const targetPath = pickedPath?.trim();
+    if (!targetPath) {
+      setNotice("请输入或选择有效的项目 Skills 目录路径");
+      return;
+    }
     void withBusy(async () => {
-      await workspaceService.addProjectRoot(pickedAgentId, pickedPath);
-      setNotice(`已登记项目目录：${displayPath(pickedPath)}`);
+      await workspaceService.addProjectRoot(pickedAgentId, targetPath);
+      setNotice(`已登记项目目录：${displayPath(targetPath)}`);
       setPickedPath(null);
       await reload(true);
     });
@@ -76,5 +89,15 @@ export function useDirectoryRegistry({
     [setNotice, setError],
   );
 
-  return { pickedPath, pickedAgentId, setPickedAgentId, pickDirectory, addRoot, removeRoot, copyPath };
+  return {
+    pickedPath,
+    setPickedPath,
+    onPathChange,
+    pickedAgentId,
+    setPickedAgentId,
+    pickDirectory,
+    addRoot,
+    removeRoot,
+    copyPath,
+  };
 }

@@ -268,6 +268,11 @@ export const workspaceService = {
     return call<string>("incorporate_to_vault", { skillPath });
   },
 
+  deactivateHomeSkill(skillPath: string): Promise<string> {
+    if (!isTauriRuntime()) return Promise.resolve(skillPath);
+    return call<string>("deactivate_home_skill", { skillPath });
+  },
+
   autoMergeIdentical(): Promise<{ mergedNames: string[]; linksCreated: number }> {
     if (!isTauriRuntime()) return Promise.resolve({ mergedNames: [], linksCreated: 0 });
     return call<{ mergedNames: string[]; linksCreated: number }>("auto_merge_identical");

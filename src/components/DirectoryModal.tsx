@@ -16,6 +16,7 @@ export function DirectoryModal({ open, onClose, controller }: Props) {
     agentName,
     busy,
     pickedPath,
+    onPathChange,
     pickedAgentId,
     setPickedAgentId,
     pickDirectory,
@@ -30,40 +31,55 @@ export function DirectoryModal({ open, onClose, controller }: Props) {
         <section className="modal-sub-section">
           <h4>添加项目 Skills 目录</h4>
           <p className="modal-sub-tip">
-            选择你本地仓库中的 skills 目录并绑定目标 Agent，系统将自动扫描其中的 SKILL.md
-            并在本地库建档。
+            直接粘贴本地项目仓库中的 skills 目录路径，或点击「浏览」进行选择，系统将自动扫描其中的 SKILL.md 并在本地库建档。
           </p>
 
           <div className="root-add-card">
-            <div className="root-add-row">
-              <Button onClick={() => void pickDirectory()} disabled={busy}>
-                <IconFolder style={{ marginRight: 6 }} />
-                {pickedPath ? "重新选择…" : "选择本地目录…"}
-              </Button>
-              <select
-                className="select-custom"
-                aria-label="目标 Agent"
-                value={pickedAgentId}
-                onChange={(event) => setPickedAgentId(event.target.value)}
-              >
-                {catalog.map((agent) => (
-                  <option key={agent.id} value={agent.id}>
-                    {agent.name}（{agent.projectRoots.join(" / ")}）
-                  </option>
-                ))}
-              </select>
-              <Button
-                variant="primary"
-                onClick={() => {
-                  void addRoot();
-                }}
-                disabled={busy || !pickedPath}
-              >
-                登记并扫描
-              </Button>
+            <div className="root-add-row-stacked">
+              <div className="root-path-input-group">
+                <input
+                  className="input-custom root-path-input"
+                  value={pickedPath ?? ""}
+                  onChange={(e) => onPathChange(e.target.value)}
+                  placeholder="在此直接粘贴或输入目录路径（如 D:\my-repo\.agents\skills）…"
+                  disabled={busy}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") void addRoot();
+                  }}
+                />
+                <Button onClick={() => void pickDirectory()} disabled={busy} title="打开系统资源管理器选择文件夹">
+                  <IconFolder style={{ marginRight: 6 }} />
+                  浏览…
+                </Button>
+              </div>
+
+              <div className="root-bind-actions-group">
+                <span className="root-bind-label">绑定目标 Agent:</span>
+                <select
+                  className="select-custom root-agent-select"
+                  aria-label="目标 Agent"
+                  value={pickedAgentId}
+                  onChange={(event) => setPickedAgentId(event.target.value)}
+                >
+                  {catalog.map((agent) => (
+                    <option key={agent.id} value={agent.id}>
+                      {agent.name}（{agent.projectRoots.join(" / ")}）
+                    </option>
+                  ))}
+                </select>
+                <Button
+                  variant="primary"
+                  onClick={() => {
+                    void addRoot();
+                  }}
+                  disabled={busy}
+                >
+                  登记并扫描
+                </Button>
+              </div>
             </div>
             {pickedPath ? (
-              <p className="root-picked-path">已选目录: <code>{displayPath(pickedPath)}</code></p>
+              <p className="root-picked-path">规范化预览: <code>{displayPath(pickedPath)}</code></p>
             ) : null}
           </div>
         </section>
